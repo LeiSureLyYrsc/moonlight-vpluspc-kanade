@@ -84,7 +84,7 @@ bool verify(const QByteArray& publicKeyB64, const QByteArray& message, const QBy
 
 const QString kChallengeId = QStringLiteral("11111111-2222-4333-8444-555555555555");
 const QString kUserId = QStringLiteral("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
-const QString kInstallationId = QStringLiteral("99999999-8888-4777-8666-555555555555");
+const QString kInstallationId = QStringLiteral("99999999-8888-4777-8666-5555555555ab");
 // 32 bytes of zero, base64url without padding -> 43 characters.
 const QString kNonce = QStringLiteral("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
 const qint64 kExpiresAt = 1900000000;
@@ -126,14 +126,14 @@ QString expectedEnrollmentMessage(const QByteArray& publicKeyB64)
         .arg(kNonce, QString::fromLatin1(publicKeyB64), kUserId);
 }
 
-QString expectedDeviceLoginMessage()
+QString expectedDeviceLoginMessage(const QString& installationId)
 {
     return QStringLiteral("{\"aud\":\"kanade\",\"challenge_id\":\"%1\",\"expires_at\":%2,"
                           "\"installation_id\":\"%3\",\"nonce\":\"%4\",\"role\":\"client\","
                           "\"type\":\"kanade.device.login\",\"user_id\":\"%5\",\"v\":1}")
         .arg(kChallengeId)
         .arg(kExpiresAt)
-        .arg(kInstallationId, kNonce, kUserId);
+        .arg(installationId, kNonce, kUserId);
 }
 
 QJsonObject enrollmentChallenge(const QByteArray& publicKeyB64,
@@ -297,7 +297,7 @@ void testEnrollmentFailsClosed()
 void testDeviceLoginMessage()
 {
     const Kanade::InstallationIdentity identity = enrolledIdentity();
-    const QString expected = expectedDeviceLoginMessage();
+    const QString expected = expectedDeviceLoginMessage(kInstallationId);
     const QJsonObject challenge = deviceLoginChallenge(expected);
 
     const QByteArray proof = Kanade::signDeviceToken(goodOrigin(), kUserId, identity, challenge);
@@ -311,10 +311,11 @@ void testDeviceLoginMessage()
     check(Kanade::signDeviceToken(goodOrigin(), kUserId, pending, challenge).isEmpty(),
           "pending identity (no installation id) cannot sign device login");
 
-    // A non-canonical installation id must not be signed.
+    // Keep the challenge message in sync so only UUID validation rejects it.
     Kanade::InstallationIdentity upper = identity;
     upper.installationId = kInstallationId.toUpper();
-    check(Kanade::signDeviceToken(goodOrigin(), kUserId, upper, challenge).isEmpty(),
+    const QJsonObject upperChallenge = deviceLoginChallenge(expectedDeviceLoginMessage(upper.installationId));
+    check(Kanade::signDeviceToken(goodOrigin(), kUserId, upper, upperChallenge).isEmpty(),
           "uppercase installation id is rejected");
 
     // Echoed installation_id must match.
