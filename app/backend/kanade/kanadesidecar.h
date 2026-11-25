@@ -199,6 +199,7 @@ private:
     qint64 m_childPid = 0;
     quint64 m_inboundSequence = 0;
     qint64 m_lastDeadlineMs = 0;
+    bool m_authorized = false;
 
     Worker* m_worker = nullptr;
     Thread* m_thread = nullptr;
