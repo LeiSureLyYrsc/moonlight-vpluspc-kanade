@@ -20,6 +20,7 @@
 
 #include "kanadeidentity.h"
 #include "kanaderuntime.h"
+#include "kanadesession.h"
 
 // The managed NATIVE controller is the only part of this lane that needs
 // NvHTTP/Session/common-c (i.e. a full GameStream build).  A headless
@@ -450,6 +451,9 @@ private:
     // for m_nativeMutex (which a worker may hold across network I/O).
     std::shared_ptr<Kanade::LiveLeaseGuard> m_nativeGuard;
     QPointer<QObject> m_issuedNativeStream;
+#endif // KANADE_CONTROL_PLANE_TEST_ONLY
+    // The lease watchdog runs for every online attempt, including a headless
+    // control-plane fixture, so it is NOT part of the native-only block above.
     QTimer m_leaseTimer;
 
     QString m_onlineErrorCode;

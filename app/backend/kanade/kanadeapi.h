@@ -178,7 +178,7 @@ private:
     void complete(RequestContext* context, const Result& result);
     void deliver(const Completion& completion, const Result& result);
 
-    void handleUnauthorized(RequestContext* context, const Result& result);
+    void handleUnauthorized(RequestContext* context);
     void startRefresh();
     void finishRefresh(const Result& result);
     void flushRefreshWaiters(bool success, const Result& failure);
