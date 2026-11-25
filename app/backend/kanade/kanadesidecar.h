@@ -182,7 +182,7 @@ signals:
     void channelReady(const QByteArray& exporter);
     // Emitted only after the sidecar reports it actually listens.
     void ready();
-    void faulted(Kanade::KanadeSidecar::SidecarFault fault, const QString& reason);
+    void faulted(Kanade::SidecarFault fault, const QString& reason);
     void stopped();
 
 private:

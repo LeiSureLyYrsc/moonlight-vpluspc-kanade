@@ -370,11 +370,15 @@ private:
     void onSidecarReady();
     void onSidecarFault(const QString& reason);
     void onSidecarStopped();
-#ifndef KANADE_CONTROL_PLANE_TEST_ONLY
+    // Declared unconditionally: the definitions in kanadecontroller.cpp carry
+    // their own KANADE_CONTROL_PLANE_TEST_ONLY no-op bodies (the fixture has no
+    // native path), and unconditional call sites (onOnlineAuthorized,
+    // onOnlineActivationConfirmed, the native worker completions) reference
+    // them in every build configuration.  Only the state they touch beyond the
+    // no-op branch lives behind the macro.
     void bindNativeRun();
     void bindNativeReady();
     void applyPendingNativeRevoke();
-#endif
     // Declared unconditionally: `Kanade::NativeReason` comes from the
     // always-included, header-only managednative.h, and teardown paths reference
     // this even in a headless fixture (where it is a no-op with a Q_UNUSED body).

@@ -1327,11 +1327,6 @@ int KanadeController::leaseRemainingMs() const
     return remaining <= 0 ? 0 : int(remaining / 1000);
 }
 
-qint64 KanadeController::onlineLeaseDeadlineMs() const
-{
-    return m_onlineSession != nullptr ? m_onlineSession->leaseDeadlineMonotonicMs() : -1;
-}
-
 void KanadeController::disableCredentialDumps()
 {
     // One-way and process-wide at the receiver.  Re-emitting is harmless and
@@ -2225,7 +2220,7 @@ void KanadeController::onOnlineAuthorized()
             connect(sidecar.get(), &Kanade::KanadeSidecar::ready, this,
                     &KanadeController::onSidecarReady);
             connect(sidecar.get(), &Kanade::KanadeSidecar::faulted, this,
-                    [this](Kanade::KanadeSidecar::SidecarFault, const QString& reason) {
+                    [this](Kanade::SidecarFault, const QString& reason) {
                         onSidecarFault(reason);
                     });
             connect(sidecar.get(), &Kanade::KanadeSidecar::stopped, this,

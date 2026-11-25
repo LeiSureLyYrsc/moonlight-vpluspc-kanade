@@ -631,14 +631,14 @@ signals:
     void prepared(quint64 sequence);
     void channel(QByteArray exporter, quint64 sequence);
     void ready(quint64 sequence);
-    void faulty(Kanade::KanadeSidecar::SidecarFault fault, QString reason);
+    void faulty(Kanade::SidecarFault fault, QString reason);
     void ended();
 
 private:
     bool sendObject(const QJsonObject& object);
     bool verifyAndLaunch(QString& reason);
     bool provePeer(QString& reason);
-    Kanade::KanadeSidecar::SidecarFault handshake(QString& reason);
+    Kanade::SidecarFault handshake(QString& reason);
 
     SidecarPlan m_plan;
     QString m_sessionId;
@@ -755,7 +755,7 @@ bool KanadeSidecar::Worker::provePeer(QString& reason)
 #endif
 }
 
-KanadeSidecar::SidecarFault KanadeSidecar::Worker::handshake(QString& reason)
+Kanade::SidecarFault KanadeSidecar::Worker::handshake(QString& reason)
 {
     // First frame only after the peer is proven.  Wire shape is EXACTLY
     // windows-sidecar-ipc-v1 (`protocol.Parse`): role/local/peer/local_seed/
