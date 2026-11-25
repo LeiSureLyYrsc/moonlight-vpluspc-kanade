@@ -3961,6 +3961,10 @@
         <translation>手动添加计算机</translation>
     </message>
     <message>
+        <source>Online devices</source>
+        <translation>在线设备</translation>
+    </message>
+    <message>
         <source>Update available for Moonlight: Version %1</source>
         <translation>Moonlight 可用更新：版本 %1</translation>
     </message>
@@ -4124,6 +4128,649 @@
     <message>
         <source>OK</source>
         <translation>确定</translation>
+    </message>
+</context>
+<context>
+    <name>KanadeDevices</name>
+    <message>
+        <source>Online devices</source>
+        <translation>在线设备</translation>
+    </message>
+    <message>
+        <source>Incorrect login or password.</source>
+        <translation>登录名或密码不正确。</translation>
+    </message>
+    <message>
+        <source>Too many attempts. Wait a moment and try again.</source>
+        <translation>尝试次数过多，请稍后再试。</translation>
+    </message>
+    <message>
+        <source>Too many requests. Wait a moment and try again.</source>
+        <translation>请求过于频繁，请稍后再试。</translation>
+    </message>
+    <message>
+        <source>This account has been disabled.</source>
+        <translation>此帐号已被停用。</translation>
+    </message>
+    <message>
+        <source>This service requires a secure HTTPS address.</source>
+        <translation>此服务要求使用安全的 HTTPS 地址。</translation>
+    </message>
+    <message>
+        <source>The service address did not match. Check it and try again.</source>
+        <translation>服务地址不匹配，请检查后重试。</translation>
+    </message>
+    <message>
+        <source>This device cannot be added right now. Try again later.</source>
+        <translation>现在无法添加此设备，请稍后再试。</translation>
+    </message>
+    <message>
+        <source>The service could not be reached. Check the address and your connection.</source>
+        <translation>无法连接服务。请检查地址和网络连接。</translation>
+    </message>
+    <message>
+        <source>The service&apos;s security certificate could not be verified.</source>
+        <translation>无法验证服务的安全证书。</translation>
+    </message>
+    <message>
+        <source>Your session has expired. Sign in again.</source>
+        <translation>会话已过期，请重新登录。</translation>
+    </message>
+    <message>
+        <source>This item no longer exists on the service.</source>
+        <translation>此项目在服务上已不存在。</translation>
+    </message>
+    <message>
+        <source>The service rejected the change because it conflicts with the current state.</source>
+        <translation>此改动与当前状态冲突，服务已拒绝。</translation>
+    </message>
+    <message>
+        <source>The service refused this action.</source>
+        <translation>服务拒绝了此操作。</translation>
+    </message>
+    <message>
+        <source>The service rejected this request. Check the entries and try again.</source>
+        <translation>服务拒绝了此请求，请检查填写内容后重试。</translation>
+    </message>
+    <message>
+        <source>The service sent an unexpected response. Try again later.</source>
+        <translation>服务返回了意外的响应，请稍后再试。</translation>
+    </message>
+    <message>
+        <source>The service reported an error. Try again later.</source>
+        <translation>服务报告了错误，请稍后再试。</translation>
+    </message>
+    <message>
+        <source>This PC could not store its installation identity safely, so online mode cannot continue.</source>
+        <translation>此电脑无法安全保存安装身份，因此在线模式无法继续。</translation>
+    </message>
+    <message>
+        <source>The operation could not be completed. Try again later.</source>
+        <translation>操作未能完成，请稍后再试。</translation>
+    </message>
+    <message>
+        <source>Waiting for the host to approve this request…</source>
+        <translation>正在等待主机批准此请求……</translation>
+    </message>
+    <message>
+        <source>The host approved this request.</source>
+        <translation>主机已批准此请求。</translation>
+    </message>
+    <message>
+        <source>The host declined this request.</source>
+        <translation>主机已拒绝此请求。</translation>
+    </message>
+    <message>
+        <source>The request expired before the host answered.</source>
+        <translation>主机尚未响应，请求已过期。</translation>
+    </message>
+    <message>
+        <source>The request was cancelled.</source>
+        <translation>请求已取消。</translation>
+    </message>
+    <message>
+        <source>Waiting for the host to accept</source>
+        <translation>正在等待主机接受</translation>
+    </message>
+    <message>
+        <source>Online session active</source>
+        <translation>在线会话活动中</translation>
+    </message>
+    <message>
+        <source>Not connected</source>
+        <translation>未连接</translation>
+    </message>
+    <message>
+        <source>Unknown</source>
+        <translation>未知</translation>
+    </message>
+    <message>
+        <source>Not paired</source>
+        <translation>未配对</translation>
+    </message>
+    <message>
+        <source>Paired</source>
+        <translation>已配对</translation>
+    </message>
+    <message>
+        <source>Certificate changed — pairing required</source>
+        <translation>证书已变更 — 需要重新配对</translation>
+    </message>
+    <message>
+        <source>No online session</source>
+        <translation>没有在线会话</translation>
+    </message>
+    <message>
+        <source>Requesting an online session…</source>
+        <translation>正在申请在线会话……</translation>
+    </message>
+    <message>
+        <source>Waiting for the host to accept…</source>
+        <translation>正在等待主机接受……</translation>
+    </message>
+    <message>
+        <source>Confirming both ends…</source>
+        <translation>正在确认两端……</translation>
+    </message>
+    <message>
+        <source>Waiting for the host to finish confirming…</source>
+        <translation>正在等待主机完成确认……</translation>
+    </message>
+    <message>
+        <source>Ending the online session…</source>
+        <translation>正在结束在线会话……</translation>
+    </message>
+    <message>
+        <source>Online session ended</source>
+        <translation>在线会话已结束</translation>
+    </message>
+    <message>
+        <source>Online session could not be established</source>
+        <translation>未能建立在线会话</translation>
+    </message>
+    <message>
+        <source>You ended the online session.</source>
+        <translation>你结束了在线会话。</translation>
+    </message>
+    <message>
+        <source>Signing out ended the online session.</source>
+        <translation>退出登录结束了在线会话。</translation>
+    </message>
+    <message>
+        <source>The host or the service ended the online session.</source>
+        <translation>主机或服务结束了在线会话。</translation>
+    </message>
+    <message>
+        <source>The authorization was removed, so the online session ended.</source>
+        <translation>授权已被移除，因此在线会话已结束。</translation>
+    </message>
+    <message>
+        <source>The lease ran out, so the online session stopped.</source>
+        <translation>租约到期，在线会话已停止。</translation>
+    </message>
+    <message>
+        <source>The host did not accept the session in time.</source>
+        <translation>主机未及时接受此会话。</translation>
+    </message>
+    <message>
+        <source>The online session expired.</source>
+        <translation>在线会话已过期。</translation>
+    </message>
+    <message>
+        <source>The service sent an unexpected response, so the session was stopped.</source>
+        <translation>服务返回了意外的响应，会话已停止。</translation>
+    </message>
+    <message>
+        <source>The authorization for this device was removed, so the online session ended.</source>
+        <translation>此设备的授权已被移除，因此在线会话已结束。</translation>
+    </message>
+    <message>
+        <source>This authorization no longer exists.</source>
+        <translation>此授权已不存在。</translation>
+    </message>
+    <message>
+        <source>This authorization belongs to a different installation.</source>
+        <translation>此授权属于另一个安装。</translation>
+    </message>
+    <message>
+        <source>The online session was closed.</source>
+        <translation>在线会话已关闭。</translation>
+    </message>
+    <message>
+        <source>This online session no longer exists.</source>
+        <translation>此在线会话已不存在。</translation>
+    </message>
+    <message>
+        <source>This device already has an online session open.</source>
+        <translation>此设备已有一个未结束的在线会话。</translation>
+    </message>
+    <message>
+        <source>The host had already accepted this session.</source>
+        <translation>主机已经接受过此会话。</translation>
+    </message>
+    <message>
+        <source>The online session&apos;s lease ran out, so it was stopped.</source>
+        <translation>在线会话的租约到期，因此已停止。</translation>
+    </message>
+    <message>
+        <source>The service rejected the session credential.</source>
+        <translation>服务拒绝了会话凭据。</translation>
+    </message>
+    <message>
+        <source>The two ends could not prove they share the same secure connection.</source>
+        <translation>两端无法证明它们处于同一条安全连接上。</translation>
+    </message>
+    <message>
+        <source>The service rejected the session activation proof.</source>
+        <translation>服务拒绝了会话激活证明。</translation>
+    </message>
+    <message>
+        <source>Another activation already claimed this session.</source>
+        <translation>已有另一次激活占用了此会话。</translation>
+    </message>
+    <message>
+        <source>The two ends did not describe the same session.</source>
+        <translation>两端描述的不是同一个会话。</translation>
+    </message>
+    <message>
+        <source>This installation is not part of that session.</source>
+        <translation>此安装不属于该会话。</translation>
+    </message>
+    <message>
+        <source>This host is disabled.</source>
+        <translation>此主机已被停用。</translation>
+    </message>
+    <message>
+        <source>This host no longer exists.</source>
+        <translation>此主机已不存在。</translation>
+    </message>
+    <message>
+        <source>This installation was revoked on the service. Sign in again.</source>
+        <translation>此安装在服务上已被撤销，请重新登录。</translation>
+    </message>
+    <message>
+        <source>Not configured for this installation</source>
+        <translation>此安装尚未配置</translation>
+    </message>
+    <message>
+        <source>Path ready — finish Sunshine pairing or select an app</source>
+        <translation>路径已就绪 — 请完成 Sunshine 配对或选择应用</translation>
+    </message>
+    <message>
+        <source>Path not ready</source>
+        <translation>路径未就绪</translation>
+    </message>
+    <message>
+        <source>Not available</source>
+        <translation>不可用</translation>
+    </message>
+    <message>
+        <source>Ready to pair</source>
+        <translation>可以配对</translation>
+    </message>
+    <message>
+        <source>Pairing with the host…</source>
+        <translation>正在与主机配对……</translation>
+    </message>
+    <message>
+        <source>The host rejected the PIN</source>
+        <translation>主机拒绝了此 PIN</translation>
+    </message>
+    <message>
+        <source>Paired — load the app list</source>
+        <translation>已配对 — 请加载应用列表</translation>
+    </message>
+    <message>
+        <source>Loading apps…</source>
+        <translation>正在加载应用……</translation>
+    </message>
+    <message>
+        <source>Apps loaded</source>
+        <translation>应用已加载</translation>
+    </message>
+    <message>
+        <source>Pairing or loading failed</source>
+        <translation>配对或加载失败</translation>
+    </message>
+    <message>
+        <source>Stopped</source>
+        <translation>已停止</translation>
+    </message>
+    <message>
+        <source>This build has no native online path.</source>
+        <translation>此构建没有原生在线路径。</translation>
+    </message>
+    <message>
+        <source>The online data path is not ready yet.</source>
+        <translation>在线数据路径尚未就绪。</translation>
+    </message>
+    <message>
+        <source>The host application version is not pinned in this installation&apos;s configuration.</source>
+        <translation>此安装的配置里没有固定主机应用版本。</translation>
+    </message>
+    <message>
+        <source>The PIN was rejected. Try pairing again.</source>
+        <translation>PIN 被拒绝，请重新配对。</translation>
+    </message>
+    <message>
+        <source>Native pairing did not complete.</source>
+        <translation>原生配对未完成。</translation>
+    </message>
+    <message>
+        <source>Pair with the host before loading apps.</source>
+        <translation>请先与主机配对，再加载应用。</translation>
+    </message>
+    <message>
+        <source>The host did not return its app list.</source>
+        <translation>主机没有返回应用列表。</translation>
+    </message>
+    <message>
+        <source>The online lease ran out, so native actions stopped.</source>
+        <translation>在线租约到期，原生操作已停止。</translation>
+    </message>
+    <message>
+        <source>This build cannot open a managed stream.</source>
+        <translation>此构建无法开启受管串流。</translation>
+    </message>
+    <message>
+        <source>The native action could not be completed.</source>
+        <translation>原生操作未能完成。</translation>
+    </message>
+    <message>
+        <source>The online path is not configured for this installation. Devices on your local network work as before.</source>
+        <translation>此安装尚未配置在线路径。局域网内的设备与以前一样可用。</translation>
+    </message>
+    <message>
+        <source>The online path is ready. Finish Sunshine pairing or select an app on the host to start.</source>
+        <translation>在线路径已就绪。请完成 Sunshine 配对，或在主机上选择应用以开始。</translation>
+    </message>
+    <message>
+        <source>The online path is not ready. The local network list is a separate way to connect.</source>
+        <translation>在线路径尚未就绪。局域网列表是另一条独立的连接方式。</translation>
+    </message>
+    <message>
+        <source>Kanade online mode</source>
+        <translation>Kanade 在线模式</translation>
+    </message>
+    <message>
+        <source>Select Connect to request an online session. When the data path is ready, pair with Sunshine or select an app. Online mode never falls back to a local network address.</source>
+        <translation>选择「连接」来请求在线会话。数据路径就绪后，再与 Sunshine 配对或选择应用。在线模式不会回退到局域网地址。</translation>
+    </message>
+    <message>
+        <source>Online mode is not available in this build. Devices on your local network work as before.</source>
+        <translation>此版本不提供在线模式。局域网内的设备与以前一样可用。</translation>
+    </message>
+    <message>
+        <source>Account</source>
+        <translation>帐号</translation>
+    </message>
+    <message>
+        <source>Not signed in</source>
+        <translation>未登录</translation>
+    </message>
+    <message>
+        <source>Online data path</source>
+        <translation>在线数据路径</translation>
+    </message>
+    <message>
+        <source>Service account</source>
+        <translation>服务帐号</translation>
+    </message>
+    <message>
+        <source>Signed in to %1</source>
+        <translation>已登录 %1</translation>
+    </message>
+    <message>
+        <source>Sign in to add and manage online devices. This does not change how local network devices work.</source>
+        <translation>登录后可添加和管理在线设备。这不影响局域网设备的现有用法。</translation>
+    </message>
+    <message>
+        <source>Service address</source>
+        <translation>服务地址</translation>
+    </message>
+    <message>
+        <source>Enter the full HTTPS address of the service, e.g. https://kanade.example.com</source>
+        <translation>请输入服务的完整 HTTPS 地址，例如 https://kanade.example.com</translation>
+    </message>
+    <message>
+        <source>Login</source>
+        <translation>登录名</translation>
+    </message>
+    <message>
+        <source>Account name</source>
+        <translation>帐号名</translation>
+    </message>
+    <message>
+        <source>Password</source>
+        <translation>密码</translation>
+    </message>
+    <message>
+        <source>Use a physical keyboard for passwords and device codes.</source>
+        <translation>请用实体键盘输入密码和设备码。</translation>
+    </message>
+    <message>
+        <source>Sign in</source>
+        <translation>登录</translation>
+    </message>
+    <message>
+        <source>Cancel sign-in</source>
+        <translation>取消登录</translation>
+    </message>
+    <message>
+        <source>Refresh devices</source>
+        <translation>刷新设备</translation>
+    </message>
+    <message>
+        <source>Sign out</source>
+        <translation>退出登录</translation>
+    </message>
+    <message>
+        <source>Forget this installation</source>
+        <translation>忘记此安装</translation>
+    </message>
+    <message>
+        <source>Signing out ends the session on this PC immediately, cancels work in progress, and keeps no password. It does not remove authorizations or Sunshine pairing on hosts.</source>
+        <translation>退出登录会立即结束此电脑上的会话、取消进行中的操作，并且不保留密码。它不会移除主机上的授权或 Sunshine 配对。</translation>
+    </message>
+    <message>
+        <source>Add a device</source>
+        <translation>添加设备</translation>
+    </message>
+    <message>
+        <source>Use the device code shown by the host. Adding a device creates an authorization only — it does not pair with Sunshine and does not open a stream.</source>
+        <translation>使用主机上显示的设备码。添加设备只会创建授权 — 不会与 Sunshine 配对，也不会开始串流。</translation>
+    </message>
+    <message>
+        <source>Device code</source>
+        <translation>设备码</translation>
+    </message>
+    <message>
+        <source>Code shown on the host</source>
+        <translation>主机上显示的码</translation>
+    </message>
+    <message>
+        <source>Approval method</source>
+        <translation>批准方式</translation>
+    </message>
+    <message>
+        <source>Device code + add password</source>
+        <translation>设备码 + 添加密码</translation>
+    </message>
+    <message>
+        <source>Ask host to approve (device code required)</source>
+        <translation>请主机批准（需要设备码）</translation>
+    </message>
+    <message>
+        <source>The host approves the same device code from its own Kanade companion. The device code is still required.</source>
+        <translation>主机将在它自己的 Kanade 伴侣程序里批准同一个设备码。设备码仍然必需。</translation>
+    </message>
+    <message>
+        <source>The host accepts the device code together with the add password.</source>
+        <translation>主机将同时核对设备码和添加密码。</translation>
+    </message>
+    <message>
+        <source>Add password</source>
+        <translation>添加密码</translation>
+    </message>
+    <message>
+        <source>Add device</source>
+        <translation>添加设备</translation>
+    </message>
+    <message>
+        <source>You can cancel at any time; the request then ends on the service.</source>
+        <translation>你可以随时取消，请求随后会在服务上结束。</translation>
+    </message>
+    <message>
+        <source>Cancel request</source>
+        <translation>取消请求</translation>
+    </message>
+    <message>
+        <source>Online session</source>
+        <translation>在线会话</translation>
+    </message>
+    <message>
+        <source>Authorization, the online service session and the local online path are separate. This card never reports a video connection.</source>
+        <translation>授权、在线服务会话与本机在线路径是三件不同的事。这张卡不会把它报告成视频连接。</translation>
+    </message>
+    <message>
+        <source>Session</source>
+        <translation>会话</translation>
+    </message>
+    <message>
+        <source>Activation</source>
+        <translation>激活</translation>
+    </message>
+    <message>
+        <source>Both ends confirmed this session</source>
+        <translation>两端已确认此会话</translation>
+    </message>
+    <message>
+        <source>Not confirmed yet</source>
+        <translation>尚未确认</translation>
+    </message>
+    <message>
+        <source>Lease</source>
+        <translation>租约</translation>
+    </message>
+    <message>
+        <source>Valid</source>
+        <translation>有效</translation>
+    </message>
+    <message>
+        <source>Not held</source>
+        <translation>未持有</translation>
+    </message>
+    <message>
+        <source>Data path</source>
+        <translation>数据路径</translation>
+    </message>
+    <message>
+        <source>Dismiss</source>
+        <translation>关闭</translation>
+    </message>
+    <message>
+        <source>End online session</source>
+        <translation>结束在线会话</translation>
+    </message>
+    <message>
+        <source>Sunshine pairing</source>
+        <translation>Sunshine 配对</translation>
+    </message>
+    <message>
+        <source>Pairing here uses the host&apos;s own PIN exchange. The PIN is generated for this attempt and shown only while it is running.</source>
+        <translation>此处的配对使用主机自己的 PIN 交换。PIN 为本次尝试生成，仅在配对进行中显示。</translation>
+    </message>
+    <message>
+        <source>Native path</source>
+        <translation>原生路径</translation>
+    </message>
+    <message>
+        <source>PIN</source>
+        <translation>PIN</translation>
+    </message>
+    <message>
+        <source>Enter this PIN in Sunshine&apos;s own web UI on the host. It is not saved and disappears when pairing ends.</source>
+        <translation>请在主机上 Sunshine 自己的网页界面里输入此 PIN。它不会被保存，配对结束后即消失。</translation>
+    </message>
+    <message>
+        <source>Pair with the host</source>
+        <translation>与主机配对</translation>
+    </message>
+    <message>
+        <source>Load apps</source>
+        <translation>加载应用</translation>
+    </message>
+    <message>
+        <source>Stop</source>
+        <translation>停止</translation>
+    </message>
+    <message>
+        <source>Unnamed app</source>
+        <translation>未命名应用</translation>
+    </message>
+    <message>
+        <source>Start</source>
+        <translation>开始</translation>
+    </message>
+    <message>
+        <source>The host returned no apps.</source>
+        <translation>主机没有返回任何应用。</translation>
+    </message>
+    <message>
+        <source>Devices</source>
+        <translation>设备</translation>
+    </message>
+    <message>
+        <source>Devices authorized with this installation. Removing an authorization never changes Sunshine pairing on the host.</source>
+        <translation>已用此安装授权的设备。移除授权不会改变主机上的 Sunshine 配对。</translation>
+    </message>
+    <message>
+        <source>No devices added yet. Adding a device works with the device code shown on the host.</source>
+        <translation>尚未添加设备。添加设备需要主机上显示的设备码。</translation>
+    </message>
+    <message>
+        <source>Unnamed host</source>
+        <translation>未命名主机</translation>
+    </message>
+    <message>
+        <source>Authorization</source>
+        <translation>授权</translation>
+    </message>
+    <message>
+        <source>Added</source>
+        <translation>已添加</translation>
+    </message>
+    <message>
+        <source>Kanade session</source>
+        <translation>Kanade 会话</translation>
+    </message>
+    <message>
+        <source>Native pairing</source>
+        <translation>原生配对</translation>
+    </message>
+    <message>
+        <source>Remove</source>
+        <translation>移除</translation>
+    </message>
+    <message>
+        <source>Connect</source>
+        <translation>连接</translation>
+    </message>
+    <message>
+        <source>If an authorization ends, is removed, or the service cannot be reached, this page stops. It never switches to a local network address and never restores an earlier stream on its own.</source>
+        <translation>授权结束、被移除或无法连接服务时，本页会就此停止。它绝不会切换到局域网地址，也不会自行恢复之前的串流。</translation>
+    </message>
+    <message>
+        <source>A stream covers this page without ending the online session. Closing this page does end it. The end action and signing out also end it.</source>
+        <translation>串流只会盖住本页，不会结束在线会话；而关闭本页会结束它。明确结束和退出登录同样会结束它。</translation>
+    </message>
+    <message>
+        <source>Remove the authorization for &apos;%1&apos;? The host must share a new device code before it can be added again. Sunshine pairing on the host is not affected.</source>
+        <translation>移除对“%1”的授权？要再次添加，主机必须提供新的设备码。主机上的 Sunshine 配对不受影响。</translation>
+    </message>
+    <message>
+        <source>Forget this installation? This PC&apos;s identity for the service is removed and you are signed out. Authorizations granted to this installation stop working here. Nothing is revoked on the service itself.</source>
+        <translation>忘记此安装？将移除此电脑在该服务上的身份，并退出登录。授予此安装的授权将在此处失效。服务端本身不会撤销任何内容。</translation>
     </message>
 </context>
 </TS>

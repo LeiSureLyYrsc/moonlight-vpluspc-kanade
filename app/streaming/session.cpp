@@ -569,25 +569,48 @@ void Session::clStageStarting(int stage)
 
 void Session::clStageFailed(int stage, int errorCode)
 {
-    // Perform the port test now, while we're on the async connection thread and not blocking the UI.
-    unsigned int portFlags = LiGetPortFlagsFromStage(stage);
-    s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
-
-    char failingPorts[128];
-    LiStringifyPortFlags(portFlags, ", ", failingPorts, sizeof(failingPorts));
+    // Managed path: never run the outbound reachability probe.  LiTestClientConnectivity
+    // dials a public test server, so it must not fire when a managed session
+    // fails: it would be traffic outside the pinned data path and it would
+    // produce a port-forwarding hint that cannot apply here.
+    const bool managed = s_ActiveSession->isManaged();
+    if (!managed) {
+        // Perform the port test now, while we're on the async connection thread and not blocking the UI.
+        unsigned int portFlags = LiGetPortFlagsFromStage(stage);
+        s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
+    }
 
     // Suppress the failure popup while we're silently retrying a reconnect
     if (s_ActiveSession->m_SuppressConnectionErrorDialog) {
         return;
     }
 
+    if (managed) {
+        // No failing-port list on the managed path: emit the stage with an empty
+        // port string so the UI cannot render a firewall/port-forward hint.
+        emit s_ActiveSession->stageFailed(QString::fromLocal8Bit(LiGetStageName(stage)),
+                                          errorCode, QString());
+        return;
+    }
+
+    unsigned int portFlags = LiGetPortFlagsFromStage(stage);
+
+    char failingPorts[128];
+    LiStringifyPortFlags(portFlags, ", ", failingPorts, sizeof(failingPorts));
+
     emit s_ActiveSession->stageFailed(QString::fromLocal8Bit(LiGetStageName(stage)), errorCode, QString(failingPorts));
 }
 
 void Session::clConnectionTerminated(int errorCode)
 {
-    unsigned int portFlags = LiGetPortFlagsFromTerminationErrorCode(errorCode);
-    s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
+    // Managed path: no outbound reachability probe, no port-forward hint and no
+    // transparent reconnect.  A managed run ends at the first termination and
+    // the owner runtime is told to stop; ordinary LAN behaviour is unchanged.
+    const bool managed = s_ActiveSession->isManaged();
+    if (!managed) {
+        unsigned int portFlags = LiGetPortFlagsFromTerminationErrorCode(errorCode);
+        s_ActiveSession->m_PortTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
+    }
 
     // Decide whether this looks like a transient network interruption that we
     // should try to silently reconnect from, rather than tearing down the
@@ -605,6 +628,17 @@ void Session::clConnectionTerminated(int errorCode)
         // unknown codes are treated as recoverable network problems.
         recoverable = true;
         break;
+    }
+
+    if (managed) {
+        recoverable = false;
+        // The managed run is over.  Revoke the shared gate so no late call can
+        // be made, and do not fall back to any unmanaged teardown path.
+        if (s_ActiveSession->m_Managed.has_value()
+            && s_ActiveSession->m_Managed->gate) {
+            s_ActiveSession->m_Managed->gate->revoke(Kanade::NativeReason::LeaseRevoked);
+        }
+        s_ActiveSession->displayManagedTerminationError(errorCode);
     }
 
     // Only attempt reconnect if video actually started and the user didn't request
@@ -632,7 +666,9 @@ void Session::clConnectionTerminated(int errorCode)
     }
 
     // Display the termination dialog if this was not intended
-    s_ActiveSession->displayTerminationError(errorCode);
+    if (!s_ActiveSession->isManaged()) {
+        s_ActiveSession->displayTerminationError(errorCode);
+    }
 
     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                  "Connection terminated: %d",
@@ -643,6 +679,44 @@ void Session::clConnectionTerminated(int errorCode)
     event.type = SDL_QUIT;
     event.quit.timestamp = SDL_GetTicks();
     pushEventOrWarn(event);
+}
+
+void Session::displayManagedTerminationError(int errorCode)
+{
+    // Deliberately mirrors the classification of displayTerminationError() but
+    // with managed-appropriate text: no port list, no firewall hint, no
+    // "check your network" advice that would point at a path this session
+    // never used.
+    switch (errorCode) {
+    case ML_ERROR_GRACEFUL_TERMINATION:
+        break;
+
+    case ML_ERROR_NO_VIDEO_TRAFFIC:
+    case ML_ERROR_NO_VIDEO_FRAME:
+        m_UnexpectedTermination = true;
+        emit displayLaunchError(tr("The managed connection ended before video started. Check the Kanade session status."));
+        break;
+
+    case ML_ERROR_PROTECTED_CONTENT:
+    case ML_ERROR_UNEXPECTED_EARLY_TERMINATION:
+        m_UnexpectedTermination = true;
+        emit displayLaunchError(tr("Something went wrong on your host PC when starting the stream.") + "\n\n" +
+                                tr("Make sure you don't have any DRM-protected content open on your host PC."));
+        break;
+
+    case ML_ERROR_FRAME_CONVERSION:
+        m_UnexpectedTermination = true;
+        emit displayLaunchError(tr("The host PC reported a fatal video encoding error."));
+        break;
+
+    default: {
+        m_UnexpectedTermination = true;
+        bool hexError = qAbs(errorCode) > 1000;
+        emit displayLaunchError(tr("Managed connection terminated") + "\n\n" +
+                                tr("Error code: %1").arg(errorCode, hexError ? 8 : 0, hexError ? 16 : 10, QChar('0')));
+        break;
+    }
+    }
 }
 
 void Session::displayTerminationError(int errorCode)
@@ -1305,6 +1379,122 @@ Session::Session(NvComputer* computer, NvApp& app, StreamingPreferences* prefere
     m_ClipboardHelper = nullptr;
 }
 
+Session::Session(const Kanade::ManagedNativeStream& stream,
+                 NvApp& app,
+                 StreamingPreferences* preferences)
+    : m_Preferences(preferences ? preferences : StreamingPreferences::get()),
+      m_IsFullScreen(m_Preferences->windowMode != StreamingPreferences::WM_WINDOWED ||
+                     !WMUtils::isRunningDesktopEnvironment()),
+      m_Computer(nullptr), m_Managed(stream), m_ManagedComputer(nullptr), m_App(app),
+      m_LaunchDisplayName(stream.hostName), m_LaunchUseVdd(std::nullopt),
+      m_Window(nullptr), m_VideoDecoder(nullptr),
+      m_DecoderLock(SDL_CreateMutex()), m_AudioMuted(false), m_QtWindow(nullptr),
+      m_WaylandStreamWindow(nullptr), m_WaylandOverlayShortcutPressed(false),
+      m_UnexpectedTermination(true), // Failure prior to streaming is unexpected
+      m_InputHandler(nullptr), m_MouseEmulationRefCount(0), m_FlushingWindowEventsRef(0),
+      m_ShouldExit(false), m_ConnectionInterrupted(false), m_SuppressConnectionErrorDialog(false),
+      m_HasReceivedVideo(false), m_LastTerminationErrorCode(0), m_AsyncConnectionSuccess(false),
+      m_LastClientSdrWhiteNits(0.0f), m_PortTestResults(0), m_OpusDecoder(nullptr),
+      m_AudioRenderer(nullptr), m_DualSenseHapticsRenderer(nullptr), m_AudioSampleCount(0),
+      m_DropAudioEndTime(0), m_MenuPanel(nullptr), m_DeferCaptureRestore(false),
+      m_PendingMicToggle(false),
+#ifdef MOONLIGHT_ENABLE_FUNCTION_TESTS
+      m_StylusReplayTest(nullptr), m_WasCapturedBeforeStylusReplayPanel(false),
+#endif
+      m_SunshineAbrEnabled(false), m_LastAbrFeedbackTicks(0),
+      m_AbrFeedbackInFlight(std::make_shared<std::atomic_bool>(false)),
+      m_AbrCurrentBitrateKbps(std::make_shared<std::atomic_int>(0)), m_Toast(nullptr),
+      m_FileMappingState(OverlayMenuPanel::FileMappingState::Unknown),
+      m_FileMappingDetail(tr("Unavailable")), m_FileMappingToast(), m_FileMappingToastPending(false),
+      m_FileMappingProbeState(nullptr), m_FileMappingMountState(nullptr), m_FileMappingMountPath(),
+      m_FileMappingSessionId(),
+      m_MenuCloseTicks(0), m_MicStream(nullptr)
+{
+    // Managed sessions do not run the file-mapping/clipboard/USB/ABR extensions,
+    // so they need no per-session diagnostic id and no host uuid.
+    memset(&m_LastAbrVideoStats, 0, sizeof(m_LastAbrVideoStats));
+    m_ClipboardHelper = nullptr;
+
+    // Build the detached projection now so every later Session member sees a
+    // valid host object.  It is display/validation only; dial targets always
+    // come from m_Managed.
+    buildManagedComputerProjection();
+}
+
+bool Session::buildManagedComputerProjection()
+{
+    if (!m_Managed.has_value() || !m_Managed->valid()) {
+        return false;
+    }
+
+    const Kanade::ManagedNativeStream& stream = *m_Managed;
+    if (!Kanade::isPinnedManagedEndpoint(stream.endpoint.host, stream.endpoint.httpPort)
+        || !Kanade::isPinnedManagedEndpoint(stream.endpoint.host, stream.endpoint.httpsPort)) {
+        return false;
+    }
+
+    auto projection = std::make_unique<NvComputer>();
+    // Only fields a stock Session reads.  The address is the locked loopback and
+    // the HTTPS port is the locked value; neither is ever used as a dial target
+    // by the managed path (which builds its own policy-scoped NvHTTP).
+    projection->name = stream.hostName.isEmpty() ? tr("Kanade") : stream.hostName;
+    projection->uuid = stream.context ? stream.context->hostId() : QString();
+    projection->activeAddress =
+        NvAddress(stream.endpoint.host, stream.endpoint.httpPort);
+    projection->activeHttpsPort = stream.endpoint.httpsPort;
+    projection->serverCert = stream.serverCert; // ephemeral, this run only
+    projection->pairState = NvComputer::PS_PAIRED;
+    projection->state = NvComputer::CS_ONLINE;
+    projection->appVersion = QStringLiteral("7.1.431.0");
+    projection->gfeVersion.clear();
+    projection->serverCodecModeSupport = SCM_H264 | SCM_HEVC | SCM_HEVC_MAIN10;
+    projection->maxLumaPixelsHEVC = 0;
+    projection->currentGameId = 0;
+    projection->gpuModel.clear();
+    projection->isNvidiaServerSoftware = false;
+    projection->isSupportedServerVersion = true;
+    projection->displayModes.clear();
+
+    m_ManagedComputer = std::move(projection);
+    m_Computer = m_ManagedComputer.get();
+    return true;
+}
+
+void Session::stopManagedHostApp()
+{
+    if (!m_Managed.has_value() || !m_Managed->gate) {
+        return;
+    }
+    Kanade::ManagedNativeStream& stream = *m_Managed;
+    const qint64 now = Kanade::managedMonotonicNowMs();
+
+    Kanade::NativeResult stopReason;
+    if (!stream.gate->beginStop(now, &stopReason)) {
+        // Already dead or already stopping: nothing further may be sent.
+        return;
+    }
+
+    try {
+        Kanade::ManagedNativePolicy policy;
+        policy.endpoint = stream.endpoint;
+        policy.gate = stream.gate;
+        policy.runGeneration = stream.gate->runGeneration();
+        policy.call = Kanade::NativeCall::Quit;
+
+        NvHTTP http(policy, stream.serverCert);
+        http.quitApp();
+    }
+    catch (const GfeHttpResponseException&) {
+        // Best effort only; the managed gate is finished either way.
+    }
+    catch (const QtNetworkReplyException&) {
+    }
+    catch (const std::exception&) {
+    }
+
+    stream.gate->finishStop();
+}
+
 Session::~Session()
 {
     // NB: This may not get destroyed for a long time! Don't put any non-trivial cleanup here.
@@ -1347,6 +1537,14 @@ void Session::updateRemoteUsbMenuState()
 void Session::refreshRemoteUsbDevices()
 {
     m_RemoteUsbDevices.clear();
+
+    // Managed path: USB forwarding is an extension outside the managed pin.
+    if (isManaged()) {
+        m_RemoteUsbState = OverlayMenuPanel::RemoteUsbState::Unavailable;
+        m_RemoteUsbDetail = tr("Unavailable");
+        updateRemoteUsbMenuState();
+        return;
+    }
 
     if (m_Preferences->usbForwardingEnabled) {
         /* Only shared (bound) devices can be forwarded, so the overlay lists
@@ -1422,6 +1620,12 @@ void Session::enumerateRemoteUsb()
 
 void Session::startRemoteUsb(const QString &deviceId)
 {
+    // Managed path: no USB capability probe and no tunnel - both are host
+    // extensions outside the managed pin.
+    if (isManaged()) {
+        showStreamingToast(tr("USB forwarding is not available in managed sessions."), 3000);
+        return;
+    }
     if (!m_Preferences->usbForwardingEnabled || deviceId.isEmpty()) {
         return;
     }
@@ -1524,6 +1728,11 @@ void Session::startRemoteUsb(const QString &deviceId)
 
 void Session::startConfiguredRemoteUsb(UsbForwarding::TunnelConfig config)
 {
+    // Managed path: belt-and-braces.  The caller is already gated, but a tunnel
+    // must never be created from a managed session even via a future call site.
+    if (isManaged()) {
+        return;
+    }
 #ifdef Q_OS_DARWIN
     /* macOS has no resident USB/IP service: spawn the bundled moonlight-usbd
      * for this device and point the tunnel at its ephemeral loopback port.
@@ -2218,7 +2427,7 @@ bool Session::validateLaunch(SDL_Window* testWindow)
         }
     }
 
-    if (m_StreamConfig.width >= 3840) {
+    if (m_StreamConfig.width >= 3840 && !isManaged()) {
         // Only allow 4K on GFE 3.x+
         if (m_Computer->gfeVersion.isEmpty() || m_Computer->gfeVersion.startsWith("2.")) {
             emitLaunchWarning(tr("GeForce Experience 3.0 or higher is required for 4K streaming."));
@@ -2326,10 +2535,13 @@ private:
 
     void run() override
     {
-        // Only quit the running app if our session terminated gracefully
+        // Only quit the running app if our session terminated gracefully.
+        // A managed session never auto-quits the host app: the managed stop is
+        // an explicit gate-checked call, not a side effect of teardown.
         bool shouldQuit =
                 !m_Session->m_UnexpectedTermination &&
-                m_Session->m_Preferences->quitAppAfter;
+                m_Session->m_Preferences->quitAppAfter &&
+                !m_Session->isManaged();
 
         // Notify the UI
         if (shouldQuit) {
@@ -2367,6 +2579,12 @@ private:
 
             // Session is finished now
             emit m_Session->sessionFinished(m_Session->m_PortTestResults);
+        }
+
+        // Knock out the managed gate so any late call is refused even if the
+        // Session object itself lingers.
+        if (m_Session->m_Managed.has_value() && m_Session->m_Managed->gate) {
+            m_Session->m_Managed->gate->revoke(Kanade::NativeReason::Stopping);
         }
 
         // Exit the entire program if requested
@@ -3036,6 +3254,10 @@ void Session::dispatchQtMenuAction(OverlayMenuPanel::MenuAction action)
     // --- Microphone toggle ---
     // Deferred: toggle mic outside processEvents() to avoid QAudioSource heap corruption
     case OverlayMenuPanel::MenuAction::ToggleMicrophone:
+        if (isManaged()) {
+            showStreamingToast(tr("Microphone is not available in managed sessions."), 3000);
+            return;
+        }
         m_PendingMicToggle = true;
         return;
 
@@ -3251,6 +3473,12 @@ bool Session::openFileMappingMountPath()
 
 void Session::requestRuntimeBitrateChange(int bitrateKbps)
 {
+    // Managed path: runtime bitrate uses the ABR control channel, a host
+    // extension outside the managed pin.
+    if (isManaged()) {
+        showStreamingToast(tr("Runtime bitrate control is not available in managed sessions."), 3000);
+        return;
+    }
     if (!m_Computer) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "Cannot change runtime bitrate: no m_Computer");
@@ -3354,6 +3582,12 @@ void Session::startSunshineAbr()
 {
     m_SunshineAbrEnabled = false;
 
+    // Managed path: the ABR control channel is a host extension outside the
+    // managed pin, so it is never configured or used.
+    if (isManaged()) {
+        return;
+    }
+
     if (!m_Preferences->enableSunshineAbr || !m_Computer) {
         return;
     }
@@ -3417,7 +3651,6 @@ void Session::stopSunshineAbr()
         m_SunshineAbrEnabled = false;
         return;
     }
-
     m_SunshineAbrEnabled = false;
 
     try {
@@ -3437,6 +3670,15 @@ void Session::stopSunshineAbr()
 
 void Session::startFileMappingUxProbe()
 {
+    // Managed path: host file mapping is an extension outside the managed pin.
+    if (isManaged()) {
+        m_FileMappingState = OverlayMenuPanel::FileMappingState::Unavailable;
+        m_FileMappingDetail = tr("Unavailable");
+        m_FileMappingToast = tr("Host file sharing is not available in managed sessions.");
+        updateFileMappingMenuState();
+        return;
+    }
+
     appendFileMappingDiagnostic(
             QStringLiteral("ux_probe.request"),
             QStringLiteral("current_state=%1").arg(fileMappingStateName(m_FileMappingState)),
@@ -3521,6 +3763,11 @@ void Session::processFileMappingUxProbeResult()
 
 void Session::startFileMappingMount()
 {
+    // Managed path: never mount a host share (extension outside the pin).
+    if (isManaged()) {
+        return;
+    }
+
     appendFileMappingDiagnostic(
             QStringLiteral("mount.request"),
             QStringLiteral("current_state=%1 existing_task=%2 mount_path=%3")
@@ -3670,6 +3917,11 @@ void Session::cleanupFileMappingMount()
 
 void Session::startFileMappingSmokeProbe()
 {
+    // Managed path: never probe the host file-mapping transport.
+    if (isManaged()) {
+        return;
+    }
+
     if (qEnvironmentVariableIntValue("MOONLIGHT_FILE_MAPPING_SMOKE") == 0) {
         return;
     }
@@ -3898,6 +4150,13 @@ public:
 
 bool Session::tryReconnect()
 {
+    // Managed path: no transparent reconnect.  A managed run that drops is
+    // over; re-establishing it needs a new armed gate and a new ready proof
+    // from the runtime, and would silently bypass the lease semantics.
+    if (isManaged()) {
+        return false;
+    }
+
     // Drop any forwarded USB device so the reconnect starts from a clean state.
     teardownUsbTunnel();
 
@@ -4110,6 +4369,19 @@ struct PreparedServerInformation
     SERVER_INFORMATION info;
 };
 
+// Strict host AppVersion for the managed path.  Foundation emits
+// nvhttp.cpp:530 `root.appversion` = its build version, i.e. a dotted numeric
+// quad.  The managed launch/resume path must never synthesise one, never fall
+// back to a constant, and never accept an empty or unparseable value: the value
+// influences host-side capability decisions and the SRTP/pairing generation
+// checks. Foundation's fourth component is the native Sunshine marker (-1).
+bool isStrictHostAppVersion(const QString& version)
+{
+    // The managed path supports only the locked Foundation wire generation;
+    // a merely parseable version might select legacy RTSP or transport paths.
+    return version == QStringLiteral("7.1.431.-1");
+}
+
 HostConnectionInfoSnapshot captureHostConnectionInfoSnapshot(NvComputer* computer)
 {
     HostConnectionInfoSnapshot snapshot;
@@ -4198,6 +4470,10 @@ void prepareServerInformation(const HostConnectionInfoSnapshot& snapshot,
 // Called in a non-main thread
 bool Session::startConnectionAsync()
 {
+    if (isManaged()) {
+        return startManagedConnectionAsync();
+    }
+
     // The UI should have ensured the old game was already quit
     // if we decide to stream a different game.
     Q_ASSERT(m_Computer->currentGameId == 0 ||
@@ -4421,11 +4697,242 @@ bool Session::startConnectionAsync()
     return true;
 }
 
+// Managed connection start.  Everything here is derived from the immutable
+// ManagedNativeStream bundle: there is no NvComputer, no address history and no
+// discovery.  Each step re-asks the shared gate, so a revoked/expired lease
+// aborts before a socket is created.
+//
+// Explicitly NOT started on this path: clipboard helper, ABR, file-mapping
+// probes, USB forwarding, microphone.  Those are the plan-3.2 host extensions
+// whose transports are not constrained by the managed pin.
+bool Session::startManagedConnectionAsync()
+{
+    if (!m_Managed.has_value() || !m_Managed->valid()) {
+        emit displayLaunchError(tr("The managed session configuration is invalid."));
+        return false;
+    }
+
+    Kanade::ManagedNativeStream& stream = *m_Managed;
+    const quint64 generation = stream.gate->runGeneration();
+    const qint64 now = Kanade::managedMonotonicNowMs();
+
+    if (!stream.gate->canOpenManagedStream(now)) {
+        // Fail closed: no common-c start, no launch call.
+        emit displayLaunchError(tr("This managed session is not ready to stream."));
+        return false;
+    }
+
+    // Fixed packet size policy: the managed path never silently downgrades.
+    // 1392 (or the native "use default" 0) only.
+    {
+        Kanade::NativeResult packetReason;
+        if (m_Preferences->packetSize != 0
+            && !Kanade::checkManagedPacketSize(m_Preferences->packetSize, &packetReason)) {
+            emit displayLaunchError(tr("The managed path only supports the default packet size. "
+                                       "Clear the custom packet size setting."));
+            return false;
+        }
+        m_StreamConfig.packetSize = Kanade::managedPacketSize();
+        m_StreamConfig.streamingRemotely = STREAM_CFG_LOCAL;
+    }
+
+    // Managed mode requests the full native encryption set.  Whether the host
+    // actually advertises RTSP encryption depends on its own
+    // lan_encryption_mode; that is an operator prerequisite of the isolated
+    // Foundation instance, not something the client may change.  The strict
+    // rtspenc:// check below refuses a plaintext answer instead of proceeding.
+    m_StreamConfig.encryptionFlags = ENCFLG_ALL;
+
+    Kanade::NativeEndpoint endpoint = stream.endpoint;
+    QSslCertificate cert = stream.serverCert;
+
+    QString rtspSessionUrl;
+    HostConnectionInfoSnapshot managedInfo;
+    managedInfo.address = endpoint.host;
+    managedInfo.appVersion.clear(); // must come from the host, never synthesised
+    managedInfo.gfeVersion.clear();
+    managedInfo.currentGameId = 0;
+    // Zero until the host reports its own capability word.  A strict launch
+    // refuses if that word is absent, so no decoder/session caps are ever
+    // invented here.
+    managedInfo.serverCodecModeSupport = 0;
+
+    // Native PIN/cert is expected to have run already; this call only uses the
+    // already-pinned ephemeral certificate.  No pairing state is persisted.
+    try {
+        Kanade::ManagedNativePolicy policy;
+        policy.endpoint = endpoint;
+        policy.gate = stream.gate;
+        policy.runGeneration = generation;
+        policy.call = Kanade::NativeCall::ServerInfo;
+
+        NvHTTP http(policy, cert);
+
+        // Refresh the host capabilities through the pinned endpoint.  This uses
+        // the managed discovery path and never adopts an unpinned HttpsPort.
+        const QString serverInfo = http.getServerInfo(NvHTTP::NVLL_NONE, true);
+        managedInfo.appVersion = NvHTTP::getXmlString(serverInfo, "appversion");
+        managedInfo.gfeVersion = NvHTTP::getXmlString(serverInfo, "GfeVersion");
+
+        // Strict Foundation AppVersion: it must parse as a sane version quad
+        // before anything is sent to launch/resume, because the pairing hash
+        // generation and the host-capability checks are derived from it.
+        // No fallback value is substituted.
+        if (!isStrictHostAppVersion(managedInfo.appVersion)) {
+            emit displayLaunchError(tr("The managed host did not report a supported version."));
+            return false;
+        }
+
+        const QString codecSupport = NvHTTP::getXmlString(serverInfo, "ServerCodecModeSupport");
+        if (codecSupport.isEmpty()) {
+            emit displayLaunchError(tr("The managed host did not report its codec capabilities."));
+            return false;
+        }
+        managedInfo.serverCodecModeSupport = codecSupport.toInt();
+
+        // Real managed resume decision.  getCurrentGame() already collapses
+        // GFE's "last played" into 0 unless the host reports _SERVER_BUSY.
+        const int currentGameId = NvHTTP::getCurrentGame(serverInfo);
+        managedInfo.currentGameId = currentGameId;
+
+        const bool resumingSession = currentGameId == m_App.id && currentGameId != 0;
+        if (currentGameId != 0 && currentGameId != m_App.id) {
+            // A DIFFERENT app is running on the host.  Refuse: this managed
+            // operation never stops someone else's stream and never falls back
+            // to a LAN path.  The operator must stop it explicitly first.
+            emit displayLaunchError(tr("A different application is already running on the managed host. "
+                                       "Stop it before starting this one."));
+            return false;
+        }
+
+        const Kanade::NativeCall call = resumingSession ? Kanade::NativeCall::Resume
+                                                        : Kanade::NativeCall::Launch;
+        if (!http.setManagedCall(call, nullptr)) {
+            emit displayLaunchError(tr("This managed session is not ready to launch or resume."));
+            return false;
+        }
+        if (!stream.gate->canOpenManagedStream(Kanade::managedMonotonicNowMs())) {
+            emit displayLaunchError(tr("This managed session is no longer valid."));
+            return false;
+        }
+
+        RemoteStreamConfig remoteStreamConfig(
+            m_Preferences->remoteResolution,
+            m_Preferences->remoteResolutionWidth,
+            m_Preferences->remoteResolutionHeight,
+            m_Preferences->remoteFps,
+            m_Preferences->remoteFpsRate,
+            m_Preferences->width,
+            m_Preferences->height,
+            0, 0, 0, 0);
+
+        http.startApp(resumingSession ? "resume" : "launch", false, m_App.id, &m_StreamConfig,
+                      m_Preferences->gameOptimizations,
+                      false, // never play audio on the host in managed mode
+                      m_InputHandler->getAttachedGamepadMask(),
+                      !m_Preferences->multiController,
+                      rtspSessionUrl,
+                      m_Preferences->screenCombinationMode,
+                      std::nullopt,
+                      QString(),
+                      remoteStreamConfig);
+
+        // startApp() already validated the URL; this is a second, independent
+        // check at the point that feeds common-c.
+        if (!Kanade::ManagedEndpointContext::validateRtspUrl(rtspSessionUrl).ok()) {
+            emit displayLaunchError(tr("The managed host returned an unexpected streaming URL."));
+            return false;
+        }
+    }
+    catch (const GfeHttpResponseException&) {
+        // Managed: no host-supplied text, no port hint.
+        emit displayLaunchError(tr("The managed host rejected the launch request."));
+        return false;
+    }
+    catch (const QtNetworkReplyException&) {
+        emit displayLaunchError(tr("Could not reach the managed host."));
+        return false;
+    }
+
+    // Last gate before common-c gets a destination.
+    if (!stream.gate->canOpenManagedStream(Kanade::managedMonotonicNowMs())) {
+        emit displayLaunchError(tr("This managed session is no longer valid."));
+        return false;
+    }
+
+    PreparedServerInformation preparedHostInfo;
+    prepareServerInformation(managedInfo, rtspSessionUrl, &preparedHostInfo);
+
+    prepareVideoCallbacksForConnection(&m_VideoCallbacks);
+
+    // common-c start.  With the reviewed port-policy patch present, the media/
+    // control ports are validated immediately before each send against the SAME
+    // shared lease, so an expired/revoked lease refuses the packet instead of
+    // failing after it left.  Without that patch the managed path refuses to
+    // start at all (checked by canOpenManagedStream above); ordinary LAN keeps
+    // calling plain LiStartConnection().
+#if defined(KANADE_PRESEND_VALIDATOR_AVAILABLE)
+    m_ManagedPortBridge.lease = stream.lease;
+    m_ManagedPortBridge.runGeneration = generation;
+    m_ManagedPortBridge.sessionId =
+        stream.context.has_value() ? stream.context->sessionId() : QString();
+
+    LI_MANAGED_PORT_POLICY portPolicy {};
+    portPolicy.enable = 1;
+    portPolicy.videoPort = Kanade::kManagedVideoUdpPort;
+    portPolicy.controlPort = Kanade::kManagedControlUdpPort;
+    portPolicy.audioPort = Kanade::kManagedAudioUdpPort;
+    portPolicy.isLive = &Kanade::managedPortIsLive;
+    // Valid from here through LiStopConnection(): this Session owns it.
+    portPolicy.context = &m_ManagedPortBridge;
+
+    // The managed path never passes a NULL policy.
+    if (!portPolicy.isLive || portPolicy.context == nullptr) {
+        emit displayLaunchError(tr("The managed stream policy is unavailable."));
+        return false;
+    }
+
+    const int err = LiStartConnectionWithPortPolicy(&preparedHostInfo.info, &m_StreamConfig,
+                                                    &k_ConnCallbacks, &m_VideoCallbacks,
+                                                    &m_AudioCallbacks, NULL, 0, NULL, 0,
+                                                    &portPolicy);
+#else
+    // No reviewed pre-send validator in this build.  The managed path must NOT
+    // silently fall back to the legacy LiStartConnection(): that would let
+    // common-c dial negotiated ports this client never validated.  Fail with a
+    // stable reason and send nothing at all (no TCP, no UDP).
+    //
+    // canOpenManagedStream() above already refuses in this configuration; this
+    // is a second, independent guard so a future refactor cannot regress it.
+    emit displayLaunchError(tr("This build cannot open a managed stream (pre-send validator missing)."));
+    return false;
+#endif
+    if (err != 0) {
+        return false;
+    }
+
+    if (m_InputHandler != nullptr) {
+        const int cursorResult =
+            LiSetCursorMode(m_InputHandler->getLocalCursorMode());
+        if (cursorResult != LI_CURSOR_MODE_OK &&
+            cursorResult != LI_CURSOR_MODE_ERR_UNSUPPORTED) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Failed to set initial local cursor mode: %d",
+                        cursorResult);
+        }
+    }
+
+    // Intentionally not started on the managed path: startSunshineAbr(),
+    // startFileMappingUxProbe(), startFileMappingSmokeProbe(), USB forwarding,
+    // clipboard helper and the microphone toggle.
+    emit connectionStarted();
+    return true;
+}
+
 void Session::flushWindowEvents()
 {
     // Pump events to ensure all pending OS events are posted
     SDL_PumpEvents();
-
     // Insert a barrier to discard any additional window events.
     // We don't use SDL_FlushEvent() here because it could cause
     // important events to be lost.
@@ -4463,7 +4970,9 @@ void Session::start()
     // Construct the clipboard sync helper process before the control receive
     // thread can possibly invoke clClipboardData(). Host frames are queued by
     // ClipboardHelperClient and flushed from the SDL loop.
-    if (m_ClipboardHelper == nullptr) {
+    // Managed path: the clipboard transport is not constrained by the managed
+    // pin, so no helper process is started and no frame is requested.
+    if (m_ClipboardHelper == nullptr && !isManaged()) {
         m_ClipboardHelper = new ClipboardHelperClient(m_Computer, this);
         m_ClipboardHelper->start();
     }
@@ -6024,6 +6533,11 @@ DispatchDeferredCleanup:
 #ifndef STEAM_LINK
 void Session::startMicrophone()
 {
+    // Managed path: microphone is an extension outside the managed pin, and the
+    // managed launch never requests host audio capture.
+    if (isManaged()) {
+        return;
+    }
     if (!m_MicStream) {
         m_MicStream = new MicStream(this);
         if (!m_MicStream->start()) {

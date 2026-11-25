@@ -169,18 +169,38 @@ GlobalCommandLineParser::ParseResult GlobalCommandLineParser::parse(const QStrin
     );
     parser.addPositionalArgument("action", "Action to execute", "<action>");
     parser.addFlagOption("disable-ui-gamepad", "disable gamepad navigation in the Moonlight UI");
-    parser.parse(args);
+#ifdef Q_OS_WIN
+    parser.addValueOption("kanade-lab-config", "read a local REM-2 peer configuration (GUI only)");
+#endif
+    const bool parsed = parser.parse(args);
     m_DisableGamepadUiNavigation = parser.isSet("disable-ui-gamepad");
     auto posArgs = parser.positionalArguments();
 
     if (posArgs.isEmpty()) {
+        if (!parsed) {
+            parser.showError(parser.errorText());
+        }
         // This method will not return and terminates the process if --version
         // or --help is specified
         parser.handleHelpAndVersionOptions();
         parser.handleUnknownOptions();
+#ifdef Q_OS_WIN
+        if (parser.isSet("kanade-lab-config")) {
+            const auto paths = parser.values("kanade-lab-config");
+            if (paths.size() != 1 || paths.first().isEmpty()) {
+                parser.showError("Supply exactly one local REM-2 configuration path.");
+            }
+            m_KanadeLabConfigPath = paths.first();
+        }
+#endif
         return NormalStartRequested;
     }
     else {
+#ifdef Q_OS_WIN
+        if (parser.isSet("kanade-lab-config")) {
+            parser.showError("The REM-2 configuration is available only for GUI startup.");
+        }
+#endif
         // If users supply arguments that accept values prior to the "quit"
         // or "stream" positional arguments, we will not be able to correctly
         // parse the value out of the input because this QCommandLineParser

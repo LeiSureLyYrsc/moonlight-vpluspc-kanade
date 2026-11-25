@@ -1,0 +1,2 @@
+patches/common-c/*.patch text eol=lf
+patches/common-c/*.json text eol=lf

@@ -13,10 +13,17 @@
 #define REQUEST_TIMEOUT_MS 5000
 
 namespace {
-QString verifyPairingStage(QString response, const char* stage)
+QString verifyPairingStage(QString response, const char* stage, bool managed = false)
 {
     try {
-        NvHTTP::verifyResponseStatus(response);
+        if (managed) {
+            // Managed: fixed reason only.  The host-supplied status_message is
+            // never copied into an exception or a log line.
+            NvHTTP::verifyManagedResponseStatus(response);
+        }
+        else {
+            NvHTTP::verifyResponseStatus(response);
+        }
     }
     catch (const GfeHttpResponseException& e) {
         throw GfeHttpResponseException(e.getStatusCode(),
@@ -28,6 +35,8 @@ QString verifyPairingStage(QString response, const char* stage)
 
 NvPairingManager::NvPairingManager(NvComputer* computer) :
     m_Http(computer),
+    m_Cert(nullptr),
+    m_PrivateKey(nullptr),
     m_Computer(computer)
 {
     QByteArray cert = IdentityManager::get()->getCertificate();
@@ -50,6 +59,65 @@ NvPairingManager::NvPairingManager(NvComputer* computer) :
     if (m_PrivateKey == nullptr)
     {
         throw std::runtime_error("Unable to load private key");
+    }
+}
+
+NvPairingManager::NvPairingManager(const Kanade::ManagedNativePolicy& policy,
+                                   QSslCertificate serverCert) :
+    m_Http(policy, std::move(serverCert)),
+    m_Cert(nullptr),
+    m_PrivateKey(nullptr),
+    m_Computer(nullptr),
+    m_Managed(policy)
+{
+    // Same installation identity as the LAN path: the managed run is a normal
+    // GameStream client to the local sidecar.  Only the target and lifetime
+    // differ, and those live in m_Http / m_Managed.
+    QByteArray cert = IdentityManager::get()->getCertificate();
+    BIO *bio = BIO_new_mem_buf(cert.data(), -1);
+    THROW_BAD_ALLOC_IF_NULL(bio);
+
+    m_Cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+    BIO_free_all(bio);
+    if (m_Cert == nullptr)
+    {
+        throw std::runtime_error("Unable to load certificate");
+    }
+
+    QByteArray pk = IdentityManager::get()->getPrivateKey();
+    bio = BIO_new_mem_buf(pk.data(), -1);
+    THROW_BAD_ALLOC_IF_NULL(bio);
+
+    m_PrivateKey = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
+    BIO_free_all(bio);
+    if (m_PrivateKey == nullptr)
+    {
+        throw std::runtime_error("Unable to load private key");
+    }
+}
+
+void NvPairingManager::requireManagedPairStage(bool fullExchange)
+{
+    if (!m_Managed.has_value()) {
+        return;
+    }
+    if (!m_Managed->valid()) {
+        throw std::runtime_error("Managed native policy is not usable");
+    }
+    const Kanade::NativeCall call = fullExchange ? Kanade::NativeCall::Pair
+                                                 : Kanade::NativeCall::PairCert;
+    const Kanade::NativeResult permit =
+        m_Managed->gate->permits(call, Kanade::managedMonotonicNowMs(), m_Managed->runGeneration);
+    if (!permit.ok()) {
+        // Reason string only: no PIN, no certificate, no payload.
+        throw std::runtime_error("Managed pairing refused: "
+                                 + Kanade::nativeReasonToString(permit.reason).toStdString());
+    }
+    // Advance the HTTP client's own slot too, so every stage request is charged
+    // against the call it really belongs to.
+    m_Managed->call = call;
+    if (!m_Http.setManagedCall(call, nullptr)) {
+        throw std::runtime_error("Managed pairing refused: pairing slot is not permitted");
     }
 }
 
@@ -231,8 +299,26 @@ NvPairingManager::saltPin(const QByteArray& salt, QString pin)
 NvPairingManager::PairState
 NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverCert)
 {
+    if (m_Managed.has_value()) {
+        // Stage 1 exchanges certificates only; stages 2..5 complete the proof.
+        requireManagedPairStage(false);
+
+        // Explicit pre-pairing semantics only.  The GameStream pairing exchange
+        // legitimately starts over plaintext HTTP because no peer certificate is
+        // known yet; that is the ONLY reason the managed path may use HTTP.  If
+        // a certificate is already pinned, pairing must not run at all - a
+        // stale/replaced certificate must never be "re-paired" behind the user's
+        // back.  The caller has to clear the pin explicitly instead.
+        if (!m_Http.serverCert().isNull()) {
+            throw std::runtime_error(
+                "Managed pairing refused: a certificate is already pinned for this run");
+        }
+    }
+
     int serverMajorVersion = NvHTTP::parseQuad(appVersion).at(0);
-    qInfo() << "Pairing with server generation:" << serverMajorVersion;
+    if (!m_Managed.has_value()) {
+        qInfo() << "Pairing with server generation:" << serverMajorVersion;
+    }
 
     QCryptographicHash::Algorithm hashAlgo;
     int hashLength;
@@ -260,7 +346,7 @@ NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverC
                                                     "devicename=roth&updateState=1&phrase=getservercert&salt=" +
                                                     salt.toHex() + "&clientcert=" + IdentityManager::get()->getCertificate().toHex(),
                                                     0);
-    verifyPairingStage(getCert, "pair stage 1 getservercert");
+    verifyPairingStage(getCert, "pair stage 1 getservercert", m_Managed.has_value());
     if (NvHTTP::getXmlString(getCert, "paired") != "1")
     {
         qCritical() << "Failed pairing at stage #1";
@@ -287,22 +373,36 @@ NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverC
     // Extract and save pairname if available
     QString pairname = NvHTTP::getXmlString(getCert, "pairname");
     if (!pairname.isEmpty()) {
-        NvComputer::savePairname(m_Computer->uuid, pairname);
-        qInfo() << "Saved pairname" << pairname << "for host" << m_Computer->uuid;
+        if (m_Managed.has_value()) {
+            // Managed path: never persist a per-host pairname, and never read
+            // or write the LAN host store (there is no NvComputer at all).
+            // The label is derived from the ephemeral cert only.
+        }
+        else {
+            NvComputer::savePairname(m_Computer->uuid, pairname);
+            qInfo() << "Saved pairname" << pairname << "for host" << m_Computer->uuid;
+        }
     }
 
     // Pin this cert for TLS until pairing is complete. If successful, we will propagate
     // the cert into the NvComputer object and persist it.
+    // Managed: this pin is EPHEMERAL - the returned certificate lives in the
+    // ManagedNativeStream bundle for this run only and is never persisted.
     m_Http.setServerCert(unverifiedServerCert);
 
     QByteArray randomChallenge = generateRandomBytes(16);
     QByteArray encryptedChallenge = encrypt(randomChallenge, aesKey);
+    if (m_Managed.has_value()) {
+        // Full exchange now: the certificate is already pinned, so every later
+        // stage is a real proof exchange.
+        requireManagedPairStage(true);
+    }
     QString challengeXml = m_Http.openConnectionToString(m_Http.m_BaseUrlHttp,
                                                          "pair",
                                                          "devicename=roth&updateState=1&clientchallenge=" +
                                                          encryptedChallenge.toHex(),
                                                          REQUEST_TIMEOUT_MS);
-    verifyPairingStage(challengeXml, "pair stage 2 clientchallenge");
+    verifyPairingStage(challengeXml, "pair stage 2 clientchallenge", m_Managed.has_value());
     if (NvHTTP::getXmlString(challengeXml, "paired") != "1")
     {
         qCritical() << "Failed pairing at stage #2";
@@ -333,7 +433,7 @@ NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverC
                                                     "devicename=roth&updateState=1&serverchallengeresp=" +
                                                     encryptedChallengeResponseHash.toHex(),
                                                     REQUEST_TIMEOUT_MS);
-    verifyPairingStage(respXml, "pair stage 3 serverchallengeresp");
+    verifyPairingStage(respXml, "pair stage 3 serverchallengeresp", m_Managed.has_value());
     if (NvHTTP::getXmlString(respXml, "paired") != "1")
     {
         qCritical() << "Failed pairing at stage #3";
@@ -380,7 +480,7 @@ NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverC
                                                           "devicename=roth&updateState=1&clientpairingsecret=" +
                                                           clientPairingSecret.toHex(),
                                                           REQUEST_TIMEOUT_MS);
-    verifyPairingStage(secretRespXml, "pair stage 4 clientpairingsecret");
+    verifyPairingStage(secretRespXml, "pair stage 4 clientpairingsecret", m_Managed.has_value());
     if (NvHTTP::getXmlString(secretRespXml, "paired") != "1")
     {
         qCritical() << "Failed pairing at stage #4";
@@ -392,7 +492,7 @@ NvPairingManager::pair(QString appVersion, QString pin, QSslCertificate& serverC
                                                              "pair",
                                                              "devicename=roth&updateState=1&phrase=pairchallenge",
                                                              REQUEST_TIMEOUT_MS);
-    verifyPairingStage(pairChallengeXml, "pair stage 5 pairchallenge");
+    verifyPairingStage(pairChallengeXml, "pair stage 5 pairchallenge", m_Managed.has_value());
     if (NvHTTP::getXmlString(pairChallengeXml, "paired") != "1")
     {
         qCritical() << "Failed pairing at stage #5";

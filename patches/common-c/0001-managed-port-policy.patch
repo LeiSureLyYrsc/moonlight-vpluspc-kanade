@@ -1,0 +1,399 @@
+diff --git a/src/AudioStream.c b/src/AudioStream.c
+index e48dc4fed1b11fa04ef99ed7582b796542a0137d..56dac8c4e270d3224f436841478e358da9ebde8e 100644
+--- a/src/AudioStream.c
++++ b/src/AudioStream.c
+@@ -90,7 +90,8 @@
+     // issues related to receiving ICMP port unreachable messages due
+     // to sending a packet prior to the host PC binding to that port.
+     int pingCount = 0;
+-    while (!PltIsThreadInterrupted(&udpPingThread)) {
++    while (!PltIsThreadInterrupted(&udpPingThread) &&
++           LiManagedPortAllowed(AudioPortNumber, 48000)) {
+         if (AudioPingPayload.payload[0] != 0) {
+             pingCount++;
+             AudioPingPayload.sequenceNumber = BE32(pingCount);
+@@ -134,6 +135,10 @@
+ int notifyAudioPortNegotiationComplete(void) {
+     LC_ASSERT(!pingThreadStarted);
+     LC_ASSERT(AudioPortNumber != 0);
++
++    if (!LiManagedPortAllowed(AudioPortNumber, 48000)) {
++        return LI_MANAGED_POLICY_ERR_PORT;
++    }
+ 
+     // For GFE 3.22 compatibility, we must start the audio ping thread before the RTSP handshake.
+     // It will not reply to our RTSP PLAY request until the audio ping has been received.
+diff --git a/src/Connection.c b/src/Connection.c
+index a19d57603b4b319844672ef30e3ea86dd9a8a186..04ce672705bfe05aa976f463f53af382e2bb21a5 100644
+--- a/src/Connection.c
++++ b/src/Connection.c
+@@ -5,6 +5,18 @@
+ static bool alreadyTerminated;
+ static PLT_THREAD terminationCallbackThread;
+ static int terminationCallbackErrorCode;
++
++// Published before starting any stream worker; cleared only after their joins.
++static LI_MANAGED_PORT_POLICY managedPorts;
++
++bool LiManagedPortsEnabled(void) {
++    return managedPorts.enable != 0;
++}
++
++bool LiManagedPortAllowed(unsigned short port, unsigned short expectedPort) {
++    return !LiManagedPortsEnabled() || (port != 0 && port == expectedPort &&
++           managedPorts.isLive != NULL && managedPorts.isLive(managedPorts.context));
++}
+ 
+ // Common globals
+ char* RemoteAddrString;
+@@ -155,6 +167,7 @@
+         Limelog("done\n");
+     }
+     LC_ASSERT(stage == STAGE_NONE);
++    memset(&managedPorts, 0, sizeof(managedPorts));
+     
+     if (RemoteAddrString != NULL) {
+         free(RemoteAddrString);
+@@ -225,10 +238,14 @@
+ }
+ 
+ // Starts the connection to the streaming machine
+-int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
++static int startConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
+     PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags,
+-    void* audioContext, int arFlags) {
++    void* audioContext, int arFlags, const LI_MANAGED_PORT_POLICY* policy) {
+     int err;
++
++    if (policy != NULL) {
++        managedPorts = *policy;
++    }
+ 
+     // Start from a clean stream socket registry in case a prior session
+     // didn't go through LiStopConnection()
+@@ -267,6 +284,13 @@
+                                      AppVersionQuad) < 0) {
+         Limelog("Invalid appversion string: %s\n", serverInfo->serverInfoAppVersion);
+         err = -1;
++        goto Cleanup;
++    }
++
++    // Only the locked Foundation-family TCP RTSP path. Older versions could
++    // use legacy TCP input/first-frame sockets or UDP RTSP.
++    if (LiManagedPortsEnabled() && (!IS_SUNSHINE() || !APP_VERSION_AT_LEAST(7, 1, 431))) {
++        err = LI_MANAGED_POLICY_ERR_MODE;
+         goto Cleanup;
+     }
+ 
+@@ -455,7 +479,19 @@
+     Limelog("Resolving host name...");
+     ListenerCallbacks.stageStarting(STAGE_NAME_RESOLUTION);
+     LC_ASSERT(RtspPortNumber != 0);
+-    if (RtspPortNumber != 48010) {
++    if (LiManagedPortsEnabled()) {
++        // No DNS, reachability TCP probes or UDP connect outside the six-port group.
++        struct sockaddr_in loopback;
++        memset(&loopback, 0, sizeof(loopback));
++        loopback.sin_family = AF_INET;
++        loopback.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++        memset(&RemoteAddr, 0, sizeof(RemoteAddr));
++        memcpy(&RemoteAddr, &loopback, sizeof(loopback));
++        LocalAddr = RemoteAddr;
++        AddrLen = sizeof(loopback);
++        err = LiManagedPortAllowed(RtspPortNumber, 48010) ? 0 : LI_MANAGED_POLICY_ERR_PORT;
++    }
++    else if (RtspPortNumber != 48010) {
+         // If we have an alternate RTSP port, use that as our test port. The host probably
+         // isn't listening on 47989 or 47984 anyway, since they're using alternate ports.
+         err = resolveHostName(serverInfo->address, AF_UNSPEC, RtspPortNumber, &RemoteAddr, &AddrLen);
+@@ -488,8 +524,8 @@
+         goto Cleanup;
+     }
+ 
+-    // Resolve LocalAddr by RemoteAddr.
+-    {
++    // Resolve LocalAddr by RemoteAddr only on the legacy path.
++    if (!LiManagedPortsEnabled()) {
+         SOCKADDR_LEN localAddrLen;
+         err = getLocalAddressByUdpConnect(&RemoteAddr, AddrLen, RtspPortNumber, &LocalAddr, &localAddrLen);
+         if (err != 0) {
+@@ -607,6 +643,11 @@
+ 
+     Limelog("Starting control stream...");
+     ListenerCallbacks.stageStarting(STAGE_CONTROL_STREAM_START);
++    if (!LiManagedPortAllowed(ControlPortNumber, 47999)) {
++        err = LI_MANAGED_POLICY_ERR_PORT;
++        ListenerCallbacks.stageFailed(STAGE_CONTROL_STREAM_START, err);
++        goto Cleanup;
++    }
+     err = startControlStream();
+     if (err != 0) {
+         Limelog("failed: %d\n", err);
+@@ -622,6 +663,11 @@
+     if (!StreamConfig.controlOnly) {
+         Limelog("Starting video stream...");
+         ListenerCallbacks.stageStarting(STAGE_VIDEO_STREAM_START);
++        if (!LiManagedPortAllowed(VideoPortNumber, 47998)) {
++            err = LI_MANAGED_POLICY_ERR_PORT;
++            ListenerCallbacks.stageFailed(STAGE_VIDEO_STREAM_START, err);
++            goto Cleanup;
++        }
+         err = startVideoStream(renderContext, drFlags);
+         if (err != 0) {
+             Limelog("Video stream start failed: %d\n", err);
+@@ -710,6 +756,36 @@
+     return err;
+ }
+ 
++int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
++    PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags,
++    void* audioContext, int arFlags) {
++    return startConnection(serverInfo, streamConfig, clCallbacks, drCallbacks, arCallbacks,
++                           renderContext, drFlags, audioContext, arFlags, NULL);
++}
++
++int LiStartConnectionWithPortPolicy(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
++    PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags,
++    void* audioContext, int arFlags, const LI_MANAGED_PORT_POLICY* policy) {
++    if (policy == NULL || policy->enable != 1 || policy->isLive == NULL || policy->context == NULL) {
++        return LI_MANAGED_POLICY_ERR_MISSING;
++    }
++    if (policy->videoPort != 47998 || policy->controlPort != 47999 || policy->audioPort != 48000) {
++        return LI_MANAGED_POLICY_ERR_PORT;
++    }
++    if (serverInfo == NULL || streamConfig == NULL || serverInfo->address == NULL ||
++        serverInfo->serverInfoAppVersion == NULL || strcmp(serverInfo->serverInfoAppVersion, "7.1.431.-1") != 0 ||
++        serverInfo->rtspSessionUrl == NULL || strcmp(serverInfo->address, "127.0.0.1") != 0 ||
++        strcmp(serverInfo->rtspSessionUrl, "rtspenc://127.0.0.1:48010") != 0 ||
++        streamConfig->controlOnly || streamConfig->enableMic) {
++        return LI_MANAGED_POLICY_ERR_MODE;
++    }
++    if (!policy->isLive(policy->context)) {
++        return LI_MANAGED_POLICY_ERR_CALLBACK;
++    }
++    return startConnection(serverInfo, streamConfig, clCallbacks, drCallbacks, arCallbacks,
++                           renderContext, drFlags, audioContext, arFlags, policy);
++}
++
+ const char* LiGetLaunchUrlQueryParameters(void) {
+     // v0 = Video encryption and control stream encryption v2
+     // v1 = RTSP encryption
+diff --git a/src/ControlStream.c b/src/ControlStream.c
+index 8a8d3b17c6bbd8995af3aae3d744ba401ce571ec..2774a8df8c7b6e3a955e8911d72c1b36a4f66bcc 100644
+--- a/src/ControlStream.c
++++ b/src/ControlStream.c
+@@ -2355,6 +2355,13 @@
+         // retransmission code to detect QoS-intolerant routes and disable QoS marking for those.
+         enet_socket_set_option (client->socket, ENET_SOCKOPT_QOS, 1);
+ 
++        if (!LiManagedPortAllowed(ControlPortNumber, 47999)) {
++            stopping = true;
++            enet_host_destroy(client);
++            client = NULL;
++            return LI_MANAGED_POLICY_ERR_PORT;
++        }
++
+         // Connect to the host
+         peer = enet_host_connect(client, &remoteAddress, CTRL_CHANNEL_COUNT, ControlConnectData);
+         if (peer == NULL) {
+diff --git a/src/Limelight-internal.h b/src/Limelight-internal.h
+index 7273e611775438b53ef37478171a66dc8cb07a37..0ee1e5cab4c3576dbd6aa5e39a76faf141c0450b 100644
+--- a/src/Limelight-internal.h
++++ b/src/Limelight-internal.h
+@@ -171,6 +171,8 @@
+ 
+ int initializeAudioStream(void);
+ int notifyAudioPortNegotiationComplete(void);
++bool LiManagedPortsEnabled(void);
++bool LiManagedPortAllowed(unsigned short port, unsigned short expectedPort);
+ void destroyAudioStream(void);
+ int startAudioStream(void* audioContext, int arFlags);
+ void stopAudioStream(void);
+diff --git a/src/Limelight.h b/src/Limelight.h
+index 10179b52dd14ea62f93f0938443087eb8a9c2e39..d4b859b8f208937df86de27ef6743ddb705d04fa 100644
+--- a/src/Limelight.h
++++ b/src/Limelight.h
+@@ -6,6 +6,7 @@
+ 
+ #include <stdint.h>
+ #include <stdbool.h>
++#include "ManagedPortPolicy.h"
+ 
+ #include "PyrowaveProtocol.h"
+ 
+@@ -803,6 +804,11 @@
+     PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags,
+     void* audioContext, int arFlags);
+ 
++// Managed startup never falls through to the legacy no-policy path.
++int LiStartConnectionWithPortPolicy(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION streamConfig, PCONNECTION_LISTENER_CALLBACKS clCallbacks,
++    PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks, void* renderContext, int drFlags,
++    void* audioContext, int arFlags, const LI_MANAGED_PORT_POLICY* policy);
++
+ // This function stops streaming. This function is not thread-safe.
+ void LiStopConnection(void);
+ 
+diff --git a/src/ManagedPortPolicy.h b/src/ManagedPortPolicy.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f6764e1025382274e29258e9e0968679d3ed540
+--- /dev/null
++++ b/src/ManagedPortPolicy.h
+@@ -0,0 +1,21 @@
++#ifndef LIMELIGHT_MANAGED_PORT_POLICY_H
++#define LIMELIGHT_MANAGED_PORT_POLICY_H
++#include <stdbool.h>
++#include <stdint.h>
++
++#define LI_MANAGED_PORT_POLICY_HAS_PRESEND_CALLBACK 1
++#define LI_MANAGED_POLICY_ERR_MISSING -6201
++#define LI_MANAGED_POLICY_ERR_PORT -6202
++#define LI_MANAGED_POLICY_ERR_CALLBACK -6203
++#define LI_MANAGED_POLICY_ERR_MODE -6204
++
++// Passed by value into the single existing common-c run. The context is
++// caller-owned and must outlive LiStopConnection (including joined workers).
++// isLive must be synchronous, nonblocking, thread-safe and never throw.
++typedef struct _LI_MANAGED_PORT_POLICY {
++    int enable;
++    uint16_t videoPort, controlPort, audioPort;
++    bool (*isLive)(void* context);
++    void* context;
++} LI_MANAGED_PORT_POLICY;
++#endif
+diff --git a/src/RtspConnection.c b/src/RtspConnection.c
+index 6678f7845eace14f67f21c5af6102f699370aaa2..2f2209bb423e2bd91d778bfec5c6b2eba90be976 100644
+--- a/src/RtspConnection.c
++++ b/src/RtspConnection.c
+@@ -425,6 +425,10 @@
+     // returns HTTP 200 OK for the /launch request before the RTSP handshake port
+     // is listening.
+     do {
++        if (!LiManagedPortAllowed(RtspPortNumber, 48010)) {
++            *error = LI_MANAGED_POLICY_ERR_PORT;
++            return false;
++        }
+         sock = connectTcpSocket(&RemoteAddr, AddrLen, RtspPortNumber, RTSP_CONNECT_TIMEOUT_SEC);
+         if (sock == INVALID_SOCKET) {
+             *error = LastSocketError();
+@@ -456,6 +460,12 @@
+     // Send our message split into smaller chunks to avoid MTU issues.
+     // enableNoDelay() must have been called for sendMtuSafe() to work.
+     enableNoDelay(sock);
++    if (!LiManagedPortAllowed(RtspPortNumber, 48010)) {
++        free(serializedMessage);
++        closeSocket(sock);
++        *error = LI_MANAGED_POLICY_ERR_PORT;
++        return false;
++    }
+     err = sendMtuSafe(sock, serializedMessage, messageLen);
+     if (err == SOCKET_ERROR) {
+         *error = LastSocketError();
+@@ -905,6 +915,20 @@
+     }
+ 
+     *port = (uint16_t)rawPort;
++    return true;
++}
++
++// The locked Foundation reply is one canonical Transport: server_port=N.
++// In managed mode malformed, duplicate, and ranged declarations are not
++// equivalent to an allowed default, even if the first number matches.
++static bool managedSetupPort(PRTSP_MESSAGE response, uint16_t* port, uint16_t expected) {
++    const char* found = uniqueMatOption(response->options, "Transport");
++    char canonical[sizeof("server_port=65535")];
++    snprintf(canonical, sizeof(canonical), "server_port=%u", (unsigned int)expected);
++    if (found == NULL || strcmp(found, canonical) != 0 || !LiManagedPortAllowed(expected, expected)) {
++        return false;
++    }
++    *port = expected;
+     return true;
+ }
+ 
+@@ -1456,7 +1480,14 @@
+ 
+             // Parse the audio port out of the RTSP SETUP response
+             LC_ASSERT(AudioPortNumber == 0);
+-            if (!parseServerPortFromTransport(&response, &AudioPortNumber)) {
++            if (LiManagedPortsEnabled()) {
++                if (!managedSetupPort(&response, &AudioPortNumber, 48000)) {
++                    ret = LI_MANAGED_POLICY_ERR_PORT;
++                    freeMessage(&response);
++                    goto Exit;
++                }
++            }
++            else if (!parseServerPortFromTransport(&response, &AudioPortNumber)) {
+                 // Use the well known port if parsing fails
+                 AudioPortNumber = 48000;
+ 
+@@ -1476,7 +1507,9 @@
+             // Let the audio stream know the port number is now finalized.
+             // NB: This is needed because audio stream init happens before RTSP,
+             // which is not the case for the video stream.
+-            notifyAudioPortNegotiationComplete();
++            if (!LiManagedPortsEnabled()) {
++                notifyAudioPortNegotiationComplete();
++            }
+ 
+             sessionId = getOptionContent(response.options, "Session");
+ 
+@@ -1535,7 +1568,14 @@
+ 
+             // Parse the video port out of the RTSP SETUP response
+             LC_ASSERT(VideoPortNumber == 0);
+-            if (!parseServerPortFromTransport(&response, &VideoPortNumber)) {
++            if (LiManagedPortsEnabled()) {
++                if (!managedSetupPort(&response, &VideoPortNumber, 47998)) {
++                    ret = LI_MANAGED_POLICY_ERR_PORT;
++                    freeMessage(&response);
++                    goto Exit;
++                }
++            }
++            else if (!parseServerPortFromTransport(&response, &VideoPortNumber)) {
+                 // Use the well known port if parsing fails
+                 VideoPortNumber = 47998;
+ 
+@@ -1627,7 +1667,14 @@
+ 
+         // Parse the control port out of the RTSP SETUP response
+         LC_ASSERT(ControlPortNumber == 0);
+-        if (!parseServerPortFromTransport(&response, &ControlPortNumber)) {
++        if (LiManagedPortsEnabled()) {
++            if (!managedSetupPort(&response, &ControlPortNumber, 47999)) {
++                ret = LI_MANAGED_POLICY_ERR_PORT;
++                freeMessage(&response);
++                goto Exit;
++            }
++        }
++        else if (!parseServerPortFromTransport(&response, &ControlPortNumber)) {
+             // Use the well known port if parsing fails
+             ControlPortNumber = 47999;
+ 
+@@ -1722,6 +1769,14 @@
+         freeMessage(&response);
+     }
+ 
++    // No managed UDP probe is attempted until ALL SETUP ports have passed.
++    if (LiManagedPortsEnabled()) {
++        ret = notifyAudioPortNegotiationComplete();
++        if (ret != 0) {
++            goto Exit;
++        }
++    }
++
+     // In control-only mode, skip PLAY for video and audio streams
+     if (StreamConfig.controlOnly) {
+         // Control-only mode: no need to PLAY video/audio streams
+diff --git a/src/VideoStream.c b/src/VideoStream.c
+index 5d5e6e63b7e2f8886c6ca494795d1e9ff143c163..b33c323e8cfe2e87879c7942b657ac8db11a8714 100644
+--- a/src/VideoStream.c
++++ b/src/VideoStream.c
+@@ -77,7 +77,8 @@
+     // issues related to receiving ICMP port unreachable messages due
+     // to sending a packet prior to the host PC binding to that port.
+     int pingCount = 0;
+-    while (!PltIsThreadInterrupted(&udpPingThread)) {
++    while (!PltIsThreadInterrupted(&udpPingThread) &&
++           LiManagedPortAllowed(VideoPortNumber, 47998)) {
+         if (VideoPingPayload.payload[0] != 0) {
+             pingCount++;
+             VideoPingPayload.sequenceNumber = BE32(pingCount);

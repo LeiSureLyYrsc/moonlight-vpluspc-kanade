@@ -6,6 +6,8 @@
 #include "remotecomputer.h"
 #include "usbforwardingcapability.h"
 
+#include "kanade/managednative.h"
+
 #include <Limelight.h>
 
 #include <QUrl>
@@ -119,7 +121,24 @@ public:
     // owning thread. Changing the paired identity discards cached connections.
     explicit NvHTTP(NvAddress address, uint16_t httpsPort, QSslCertificate serverCert, bool useTrueUid = false, QNetworkAccessManager* nam = nullptr, QString uuid = "");
 
+    // Managed (Kanade online) native control client.  The endpoint is not a
+    // parameter: it is always the pinned loopback pair from the policy, the
+    // HTTPS port is always the locked 47984, redirects are never followed, and
+    // every request first asks the shared ManagedNativeGate for permission.
+    // There is no address history, no discovery, no UUID merge and no
+    // clientname/pairname settings lookup on this path.
+    //
+    // A managed instance is created from an explicit policy only.  It has no
+    // legacy fallback: a missing, dead or invalid gate refuses every call and
+    // can never degrade into the unmanaged behaviour.
+    explicit NvHTTP(const Kanade::ManagedNativePolicy& policy, QSslCertificate serverCert,
+                    QNetworkAccessManager* nam = nullptr);
+
     explicit NvHTTP(NvComputer* computer, QNetworkAccessManager* nam = nullptr);
+
+    // True when this instance was constructed for the managed path.  Managed
+    // instances refuse every host extension below.
+    bool isManaged() const { return m_Managed.has_value(); }
 
     static
     int
@@ -128,9 +147,36 @@ public:
     QString
     getServerInfo(NvLogLevel logLevel, bool fastFail = false);
 
+    // Managed-only discovery: HTTPS whenever a pinned certificate is present,
+    // HTTP only for the bootstrap/not-paired reply, exact advertised HttpsPort
+    // required, no address fallback.  Never used by unmanaged hosts.
+    QString
+    getManagedServerInfo(NvLogLevel logLevel, bool fastFail);
+
+    // Managed snapshots must carry exactly one canonical HttpsPort equal to the
+    // locked 47984.  No fallback on a missing/duplicate/alternate value.
+    static
+    void
+    requireManagedHttpsPort(const QString& serverInfoXml);
+
+    // Managed FIRST-PAIR bootstrap only: the one narrow case where the managed
+    // path may read a plaintext `serverinfo` reply.  Requires managed call slot
+    // PairCert, no pinned certificate yet, and the pinned loopback endpoint.
+    // Rejects everything else; the reply is validated (single canonical
+    // HttpsPort) and never retained as host state.
+    QString
+    getManagedPairingBootstrap(NvLogLevel logLevel = NvLogLevel::NVLL_NONE);
+
     static
     void
     verifyResponseStatus(QString xml);
+
+    // Managed variant: identical status handling but the host-supplied
+    // status_message is never logged or surfaced (it can echo request
+    // material).  Thrown messages are fixed strings.
+    static
+    void
+    verifyManagedResponseStatus(QString xml);
 
     static
     QString
@@ -174,6 +220,10 @@ public:
     void setHttpsPort(uint16_t port);
     void setTrueUid(bool useTrueUid);
     void setHostUuid(QString uuid);
+
+    // Managed path only: moves the policy to the next permitted native call
+    // (e.g. ServerInfo -> AppList -> Launch).  Refused on unmanaged instances.
+    bool setManagedCall(Kanade::NativeCall call, QString* reasonOut = nullptr);
 
     NvAddress address();
 
@@ -253,4 +303,14 @@ private:
     QSslCertificate m_ServerCert;
     bool m_UseTrueUid;
     QString m_Uuid;
+    // Set exactly when the managed constructor was used.  An engaged value with
+    // an invalid policy is a hard error, never a downgrade.
+    std::optional<Kanade::ManagedNativePolicy> m_Managed;
+
+    // Refuses a managed request whose gate no longer permits it.  Throws, so
+    // no byte is written, and never falls back to an unmanaged request.
+    void requireManagedPermission(Kanade::NativeCall call) const;
+    // True only when a managed instance's policy is fully valid.  Throws when
+    // the instance is managed but the policy is not usable.
+    bool managedActive() const;
 };

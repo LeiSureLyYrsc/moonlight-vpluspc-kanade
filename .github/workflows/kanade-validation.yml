@@ -1,0 +1,174 @@
+name: Kanade client validation (Windows x64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [rem-2-validation]
+
+permissions:
+  contents: read
+
+jobs:
+  qml:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.1'
+          modules: qtmultimedia qtimageformats
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@073e34d7c2ab4ae6961ed7cca690b3abd5ba5a7e'
+      - run: bash scripts/qmllint-check.sh
+
+  windows:
+    needs: qml
+    runs-on: windows-2022
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Lock checkout and version
+        shell: pwsh
+        run: |
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:GITHUB_SHA) { throw 'Unexpected checkout' }
+          $common = git rev-parse HEAD:moonlight-common-c/moonlight-common-c
+          if ($LASTEXITCODE -ne 0 -or $common -ne '733025a254e6e166a4afb577cbe056c10257f950') { throw 'Unexpected common-c pin' }
+          $checkout = git -C moonlight-common-c/moonlight-common-c rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $checkout -ne $common) { throw 'Wrong common-c checkout' }
+          $version = python -B scripts/derive-version.py --field artifact
+          if ($LASTEXITCODE -ne 0 -or !$version) { throw 'Could not derive version' }
+          "CI_VERSION=$version" >> $env:GITHUB_ENV
+      - name: Validate and apply the locked common-c patch
+        shell: pwsh
+        run: |
+          $source = 'moonlight-common-c/moonlight-common-c'
+          $patchPath = 'patches/common-c/0001-managed-port-policy.patch'
+          $patch = (Resolve-Path -LiteralPath $patchPath).Path
+          $manifest = Get-Content -Raw 'patches/common-c/0001-managed-port-policy.json' | ConvertFrom-Json
+          $pin = git rev-parse "HEAD:$source"
+          if ($LASTEXITCODE -ne 0 -or $pin -ne $manifest.gitlink) { throw 'Wrong patch base gitlink' }
+          if ((Get-FileHash -LiteralPath $patch -Algorithm SHA256).Hash -ne $manifest.patch_sha256) { throw 'Wrong patch hash' }
+          $dirty = git -C $source status --porcelain --untracked-files=all
+          if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'Patch requires a clean submodule checkout' }
+          foreach ($entry in $manifest.files.PSObject.Properties) {
+            if (!$entry.Value.before) {
+              if (Test-Path -LiteralPath (Join-Path $source $entry.Name)) { throw 'Expected new patch file' }
+              continue
+            }
+            $before = git -C $source rev-parse "HEAD:$($entry.Name)"
+            if ($LASTEXITCODE -ne 0 -or $before -ne $entry.Value.before) { throw 'Wrong upstream blob' }
+          }
+          git -C $source apply --check --verbose $patch
+          if ($LASTEXITCODE -ne 0) { throw 'Patch does not apply to the locked source' }
+          git -C $source apply --verbose $patch
+          if ($LASTEXITCODE -ne 0) { throw 'Patch application failed' }
+          $actual = git -C $source ls-files --modified --others --exclude-standard
+          if ($LASTEXITCODE -ne 0 -or (Compare-Object @($manifest.files.PSObject.Properties.Name) @($actual))) { throw 'Unexpected changed paths' }
+          foreach ($entry in $manifest.files.PSObject.Properties) {
+            $after = git -c core.autocrlf=input -C $source hash-object "--path=$($entry.Name)" -- $entry.Name
+            if ($LASTEXITCODE -ne 0 -or $after -ne $entry.Value.after) { throw 'Wrong patched blob' }
+          }
+          git -c diff.ignoreSubmodules=dirty diff --quiet -- $source
+          if ($LASTEXITCODE -ne 0) { throw 'common-c gitlink changed' }
+      - uses: jdpurcell/install-qt-action@v5
+        with:
+          arch: win64_msvc2022_64
+          host: windows
+          target: desktop
+          version: '6.12.0'
+          modules: qtmultimedia qtimageformats
+          use-naqt: true
+      - name: Fetch pinned Windows dependencies on the runner
+        shell: pwsh
+        run: ./setup-deps.ps1
+      - name: Reserve isolated DPAPI test storage
+        shell: pwsh
+        run: |
+          $drive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='D:'"
+          if (!$drive -or $drive.DriveType -ne 3 -or $drive.FileSystem -ne 'NTFS' -or $env:SystemDrive -eq 'D:') {
+            throw 'The DPAPI fixtures require the isolated runner D: NTFS volume'
+          }
+          $testRoot = Join-Path 'D:\' "rem2-tests-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $testRoot) { throw 'Unexpected existing DPAPI test root' }
+          New-Item -ItemType Directory -Path $testRoot | Out-Null
+          "KANADE_DPAPI_TEST_ROOT=$testRoot" >> $env:GITHUB_ENV
+      - name: Run Kanade fixture tests and native regression checks
+        shell: cmd
+        env:
+          JOM_MAX_CPUS: '2'
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set "PATH=%CD%\libs\windows\lib\x64;%PATH%"
+          call scripts\run-test.bat kanade_control kanade_control_test
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          call scripts\run-test.bat kanade_identity kanade_identity_test
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          call scripts\run-test.bat kanade_identity_win32 kanade_identity_win32_test
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          call scripts\run-test.bat kanade_https kanade_https_test
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          call scripts\run-test.bat kanade_session kanade_session_test
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          call scripts\run-test.bat kanade_managed_endpoint kanade_managed_endpoint_test
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          call scripts\run-test.bat kanade_commonc_port_policy kanade_commonc_port_policy_test
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          call scripts\run-test.bat reconnect_video_callbacks reconnect_video_callbacks
+          if errorlevel 1 exit /b %ERRORLEVEL%
+      - name: Build unsigned Moonlight V+ x64 portable on the runner
+        shell: cmd
+        env:
+          JOM_MAX_CPUS: '2'
+          MOONLIGHT_CI_BUILD: '1'
+        run: |
+          set ML_SYMBOL_STORE=
+          set ML_SYMBOL_ARCHIVE=
+          set SIGN=
+          call scripts\build-arch.bat release x64
+          if errorlevel 1 exit /b %ERRORLEVEL%
+      - name: Record portable provenance
+        shell: pwsh
+        run: |
+          $zip = @(Get-ChildItem build/installer-x64-release/Moonlight-VPlus-Portable-x64-*.zip)
+          if ($zip.Count -ne 1 -or $zip[0].Length -eq 0) { throw 'Missing unique portable package' }
+          $archive = [IO.Compression.ZipFile]::OpenRead($zip[0].FullName)
+          try {
+            $client = $archive.GetEntry('Moonlight.exe')
+            if (!$client -or $client.Length -eq 0 -or !$archive.GetEntry('portable.dat')) {
+              throw 'Package does not contain the portable executable and marker'
+            }
+            $stream = $client.Open()
+            try { $clientHash = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash }
+            finally { $stream.Dispose() }
+          } finally { $archive.Dispose() }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip[0].FullName).Hash
+          @{
+            source_sha = $env:GITHUB_SHA
+            common_c = '733025a254e6e166a4afb577cbe056c10257f950'
+            common_c_patch_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath 'patches/common-c/0001-managed-port-policy.patch').Hash
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            version = $env:CI_VERSION
+            file = $zip[0].Name
+            sha256 = $hash
+            moonlight_exe_sha256 = $clientHash
+            scope = 'Unsigned Windows x64 lab client; not a release or proof of two-machine streaming'
+          } | ConvertTo-Json | Set-Content -Encoding utf8 build/kanade-validation.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moonlight-vplus-kanade-windows-x64-${{ github.sha }}
+          path: |
+            build/installer-x64-release/Moonlight-VPlus-Portable-x64-*.zip
+            build/kanade-validation.json
+          if-no-files-found: error
+          retention-days: 7

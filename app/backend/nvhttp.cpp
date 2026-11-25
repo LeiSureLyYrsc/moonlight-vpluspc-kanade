@@ -52,6 +52,108 @@ NvHTTP::NvHTTP(NvComputer* computer, QNetworkAccessManager* nam) :
 {
 }
 
+NvHTTP::NvHTTP(const Kanade::ManagedNativePolicy& policy, QSslCertificate serverCert,
+               QNetworkAccessManager* nam) :
+    m_Nam(nam ? nam : new QNetworkAccessManager(this)),
+    m_ServerCert(std::move(serverCert)),
+    m_UseTrueUid(true),
+    m_Managed(policy)
+{
+    // Fail closed at construction: a managed instance must never exist in a
+    // state that could degrade to unmanaged behaviour.  Nothing has been sent
+    // yet, so throwing here is safe.
+    if (!policy.valid()) {
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("Managed native policy is invalid"));
+    }
+    if (m_ServerCert.isNull() && policy.call != Kanade::NativeCall::PairCert) {
+        // Managed native trust is always an explicit pin, with ONE narrow
+        // exception: the pre-pairing certificate exchange has no peer
+        // certificate yet.  Anything else without a pin refuses to construct.
+        throw QtNetworkReplyException(QNetworkReply::SslHandshakeFailedError,
+                                      QStringLiteral("Managed native policy has no pinned certificate"));
+    }
+
+    // The managed endpoint is fixed by the policy; nothing here reads a host
+    // object, an address list or a settings entry.  httpPort()/httpsPort() are
+    // therefore always the locked pair.
+    m_BaseUrlHttp.setScheme("http");
+    m_BaseUrlHttps.setScheme("https");
+    m_Address = NvAddress(policy.endpoint.host, policy.endpoint.httpPort);
+    m_BaseUrlHttp.setHost(policy.endpoint.host);
+    m_BaseUrlHttps.setHost(policy.endpoint.host);
+    m_BaseUrlHttp.setPort(policy.endpoint.httpPort);
+    m_BaseUrlHttps.setPort(policy.endpoint.httpsPort);
+
+    // Never use a proxy server
+    QNetworkProxy noProxy(QNetworkProxy::NoProxy);
+    m_Nam->setProxy(noProxy);
+}
+
+bool NvHTTP::managedActive() const
+{
+    if (!m_Managed.has_value()) {
+        return false;
+    }
+    if (!m_Managed->valid()) {
+        // An engaged-but-invalid managed descriptor is an error, never a
+        // silent downgrade to the legacy client.
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("Managed native policy is not usable"));
+    }
+    return true;
+}
+
+bool NvHTTP::setManagedCall(Kanade::NativeCall call, QString* reasonOut)
+{
+    if (!m_Managed.has_value()) {
+        if (reasonOut) {
+            *reasonOut = QStringLiteral("not a managed native client");
+        }
+        return false;
+    }
+    if (!m_Managed->valid()) {
+        if (reasonOut) {
+            *reasonOut = QStringLiteral("managed_native_policy_invalid");
+        }
+        return false;
+    }
+    if (call == Kanade::NativeCall::Quit) {
+        // Cleanup-only slot: it may move the instance to quit, never re-open.
+        m_Managed->call = call;
+        return true;
+    }
+    const Kanade::NativeResult permit =
+        m_Managed->gate->permits(call, Kanade::managedMonotonicNowMs(), m_Managed->runGeneration);
+    if (!permit.ok()) {
+        if (reasonOut) {
+            *reasonOut = Kanade::nativeReasonToString(permit.reason);
+        }
+        return false;
+    }
+    m_Managed->call = call;
+    return true;
+}
+
+void NvHTTP::requireManagedPermission(Kanade::NativeCall call) const
+{
+    if (!m_Managed.has_value()) {
+        return; // unmanaged instance: legacy behaviour is untouched
+    }
+    if (!m_Managed->valid()) {
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("Managed native policy is not usable"));
+    }
+    const Kanade::NativeResult permit =
+        m_Managed->gate->permits(call, Kanade::managedMonotonicNowMs(), m_Managed->runGeneration);
+    if (!permit.ok()) {
+        // Thrown before any socket is touched; no managed fallback exists.
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("Managed native call refused: ")
+                                          + Kanade::nativeReasonToString(permit.reason));
+    }
+}
+
 void NvHTTP::setServerCert(QSslCertificate serverCert)
 {
     m_ServerCert = serverCert;
@@ -60,6 +162,13 @@ void NvHTTP::setServerCert(QSslCertificate serverCert)
 void NvHTTP::setAddress(NvAddress address)
 {
     Q_ASSERT(!address.isNull());
+
+    // A managed client may never be re-pointed: its only target is the pinned
+    // loopback endpoint of the immutable policy.
+    if (m_Managed.has_value()) {
+        Q_ASSERT(false);
+        return;
+    }
 
     m_Address = address;
 
@@ -71,6 +180,14 @@ void NvHTTP::setAddress(NvAddress address)
 
 void NvHTTP::setHttpsPort(uint16_t port)
 {
+    if (managedActive()) {
+        // Strict managed HTTPS port: an advertised value that is not the locked
+        // 47984 is refused, not silently adopted.
+        if (port != Kanade::ManagedEndpointContext::kManagedHttpsPort) {
+            throw GfeHttpResponseException(-1, "Managed host advertised a non-pinned HttpsPort");
+        }
+        return;
+    }
     m_BaseUrlHttps.setPort(port);
 }
 
@@ -147,6 +264,10 @@ NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
 {
     QString serverInfo;
 
+    if (managedActive()) {
+        return getManagedServerInfo(logLevel, fastFail);
+    }
+
     // Check if we have a pinned cert and HTTPS port for this host yet
     if (!m_ServerCert.isNull() && httpsPort() != 0)
     {
@@ -207,6 +328,112 @@ NvHTTP::getServerInfo(NvLogLevel logLevel, bool fastFail)
     }
 
     return serverInfo;
+}
+
+QString
+NvHTTP::getManagedServerInfo(NvLogLevel logLevel, bool fastFail)
+{
+    const int timeout = fastFail ? FAST_FAIL_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+
+    requireManagedPermission(Kanade::NativeCall::ServerInfo);
+
+    if (m_ServerCert.isNull()) {
+        // Discovery on the managed path always runs against the already-pinned
+        // certificate.  Without one there is nothing to authenticate the peer,
+        // so the snapshot is refused instead of being taken over plaintext.
+        throw QtNetworkReplyException(QNetworkReply::SslHandshakeFailedError,
+                                      QStringLiteral("Managed discovery requires a pinned certificate"));
+    }
+
+    // Managed discovery is HTTPS-only with the already-pinned certificate.
+    // There is deliberately NO plaintext fallback: a 401, a TLS failure, a
+    // certificate mismatch or a missing HttpsPort all end the call.  A managed
+    // run therefore never depends on an unauthenticated bootstrap reply, and a
+    // replaced certificate can never trigger automatic HTTP recovery.
+    const QString serverInfo = openConnectionToString(m_BaseUrlHttps, "serverinfo", nullptr,
+                                                      timeout, logLevel);
+    verifyManagedResponseStatus(serverInfo);
+    requireManagedHttpsPort(serverInfo);
+    return serverInfo;
+}
+
+QString
+NvHTTP::getManagedPairingBootstrap(NvLogLevel logLevel)
+{
+    // Narrow, purpose-built exception to "managed discovery is HTTPS-only".
+    //
+    // The GameStream pairing exchange legitimately begins over plaintext HTTP
+    // because no peer certificate exists yet.  That reply is needed for exactly
+    // two things: the host app version (to pick the pairing hash generation) and
+    // confirmation of the pinned HttpsPort for the stage-5 TLS exchange.
+    //
+    // It is therefore available ONLY:
+    //   * while this instance's managed call slot is PairCert (i.e. reached
+    //     through the native pairing path, never through discovery);
+    //   * while NO certificate is pinned yet - once one exists, a replaced
+    //     certificate can never be re-bootstrapped or re-paired automatically;
+    //   * against the pinned loopback HTTP endpoint only.
+    //
+    // The reply is never retained as host state, never merged into a projection
+    // and never used to choose a dial target beyond the fixed pinned endpoint.
+    if (!m_Managed.has_value()) {
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("Managed pairing bootstrap requires the managed path"));
+    }
+    if (!m_Managed->valid()) {
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("Managed native policy is not usable"));
+    }
+    if (m_Managed->call != Kanade::NativeCall::PairCert) {
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("Managed bootstrap is only available to native pairing"));
+    }
+    if (!m_ServerCert.isNull()) {
+        throw QtNetworkReplyException(QNetworkReply::SslHandshakeFailedError,
+                                      QStringLiteral("A certificate is already pinned; no pairing bootstrap"));
+    }
+
+    requireManagedPermission(Kanade::NativeCall::PairCert);
+
+    const QString serverInfo = openConnectionToString(m_BaseUrlHttp, "serverinfo", nullptr,
+                                                      FAST_FAIL_TIMEOUT_MS, logLevel);
+    verifyManagedResponseStatus(serverInfo);
+
+    // The stage-5 target must be the pinned port, and it must be advertised by
+    // the host rather than assumed.  This is a validation, never an adoption.
+    requireManagedHttpsPort(serverInfo);
+    return serverInfo;
+}
+
+void
+NvHTTP::requireManagedHttpsPort(const QString& serverInfoXml)
+{
+    // Foundation nvhttp.cpp:534 always emits root.HttpsPort.  On the managed
+    // path it is not advice to adopt: it must be present EXACTLY once and be the
+    // canonical text of the locked 47984.  Missing, duplicated, alternate,
+    // zero-padded or non-numeric values all refuse the whole snapshot, before
+    // it can be projected into any host object or fed to a native launch.
+    static const QString kTag = QStringLiteral("HttpsPort");
+    static const QString kExpected = QString::number(Kanade::ManagedEndpointContext::kManagedHttpsPort);
+
+    int occurrences = 0;
+    QString value;
+    QXmlStreamReader xmlReader(serverInfoXml);
+    while (!xmlReader.atEnd()) {
+        if (xmlReader.readNext() != QXmlStreamReader::StartElement) {
+            continue;
+        }
+        if (xmlReader.name() != kTag) {
+            continue;
+        }
+        ++occurrences;
+        if (occurrences == 1) {
+            value = xmlReader.readElementText();
+        }
+    }
+    if (xmlReader.hasError() || occurrences != 1 || value != kExpected) {
+        throw GfeHttpResponseException(-1, "Managed host snapshot has no single pinned HttpsPort");
+    }
 }
 
 void
@@ -301,35 +528,83 @@ NvHTTP::startApp(QString verb,
 
     query += LiGetLaunchUrlQueryParameters();
 
+    if (managedActive()) {
+        requireManagedPermission(verb == QStringLiteral("resume")
+                                     ? Kanade::NativeCall::Resume
+                                     : Kanade::NativeCall::Launch);
+    }
+
     QString response = openConnectionToString(m_BaseUrlHttps,
                                               verb,
                                               query,
-                                              LAUNCH_TIMEOUT_MS);
+                                              LAUNCH_TIMEOUT_MS,
+                                              m_Managed.has_value() ? NVLL_NONE : NVLL_VERBOSE);
 
-    qInfo() << "Launch response:" << response;
+    if (!m_Managed.has_value()) {
+        qInfo() << "Launch response:" << response;
+    }
+    // Managed: never echo the launch reply -- the body carries the RTSP session
+    // URL and per-session material.  Managed logging is reason codes only.
 
     // Throws if the request failed
-    verifyResponseStatus(response);
+    if (managedActive()) {
+        verifyManagedResponseStatus(response);
+    }
+    else {
+        verifyResponseStatus(response);
+    }
 
     rtspSessionUrl = getXmlString(response, "sessionUrl0");
+
+    if (managedActive()) {
+        // Strict RTSP URL: only the exact encrypted loopback shape is accepted.
+        // Anything else (plaintext scheme, another host/port, a path/suffix)
+        // would let common-c dial somewhere this context never approved.
+        const Kanade::ValidationResult rtsp =
+            Kanade::ManagedEndpointContext::validateRtspUrl(rtspSessionUrl);
+        if (!rtsp.ok()) {
+            rtspSessionUrl.clear();
+            throw GfeHttpResponseException(-1, "Managed host returned a non-pinned RTSP URL");
+        }
+    }
 }
 
 void
 NvHTTP::quitApp()
 {
+    if (managedActive()) {
+        // Quit is the only managed call allowed while stopping, and only while
+        // the gate is still alive (never after death).
+        requireManagedPermission(Kanade::NativeCall::Quit);
+    }
+
     QString response =
             openConnectionToString(m_BaseUrlHttps,
                                    "cancel",
                                    nullptr,
-                                   QUIT_TIMEOUT_MS);
+                                   QUIT_TIMEOUT_MS,
+                                   m_Managed.has_value() ? NVLL_NONE : NVLL_VERBOSE);
 
-    qInfo() << "Quit response:" << response;
+    if (!m_Managed.has_value()) {
+        qInfo() << "Quit response:" << response;
+    }
 
     // Throws if the request failed
-    verifyResponseStatus(response);
+    if (managedActive()) {
+        verifyManagedResponseStatus(response);
+    }
+    else {
+        verifyResponseStatus(response);
+    }
 
     // Newer GFE versions will just return success even if quitting fails
     // if we're not the original requester.
+    if (managedActive()) {
+        // No follow-up discovery on the managed path: the stop must not make
+        // any further contact, and "someone else's stream" cannot apply to a
+        // single managed session.
+        return;
+    }
     if (getCurrentGame(getServerInfo(NvHTTP::NVLL_ERROR)) != 0) {
         // Generate a synthetic GfeResponseException letting the caller know
         // that they can't kill someone else's stream.
@@ -369,6 +644,10 @@ NvHTTP::getDisplayModeList(QString serverInfo)
 QVector<NvApp>
 NvHTTP::getAppList()
 {
+    if (managedActive()) {
+        requireManagedPermission(Kanade::NativeCall::AppList);
+    }
+
     QString appxml = openConnectionToString(m_BaseUrlHttps,
                                             "applist",
                                             nullptr,
@@ -515,9 +794,41 @@ NvHTTP::verifyResponseStatus(QString xml)
     throw GfeHttpResponseException(-1, "Malformed XML (missing root element)");
 }
 
+void
+NvHTTP::verifyManagedResponseStatus(QString xml)
+{
+    QXmlStreamReader xmlReader(xml);
+
+    while (xmlReader.readNextStartElement())
+    {
+        if (XML_NAME_EQUALS(xmlReader.name(), "root"))
+        {
+            const int statusCode = (int)xmlReader.attributes().value("status_code").toUInt();
+            if (statusCode == 200)
+            {
+                return;
+            }
+
+            // Never copy status_message: it is host-controlled text that can
+            // echo request material.  Only the numeric status and a fixed
+            // reason leave this function.
+            if (statusCode == -1) {
+                throw GfeHttpResponseException(418, QStringLiteral("Managed host rejected the request"));
+            }
+            throw GfeHttpResponseException(statusCode, QStringLiteral("Managed host request failed"));
+        }
+    }
+
+    throw GfeHttpResponseException(-1, QStringLiteral("Managed host reply was malformed"));
+}
+
 QImage
 NvHTTP::getBoxArt(int appId)
 {
+    if (managedActive()) {
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("Box art is disabled on the managed path"));
+    }
     QNetworkReply* reply = openConnection(m_BaseUrlHttps,
                                           "appasset",
                                           "appid="+QString::number(appId)+
@@ -592,6 +903,12 @@ NvHTTP::openConnectionToString(QUrl baseUrl,
 
 UsbForwarding::Capability NvHTTP::getUsbForwardingCapability()
 {
+    if (managedActive()) {
+        // Managed path: host extensions are disabled.  Refused before any
+        // connection, not a warning.
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("USB forwarding is disabled on the managed path"));
+    }
     if (m_ServerCert.isNull() || httpsPort() == 0) {
         throw GfeHttpResponseException(401, "USB forwarding requires a paired host");
     }
@@ -614,6 +931,10 @@ UsbForwarding::Capability NvHTTP::getUsbForwardingCapability()
 bool
 NvHTTP::getAbrCapabilities(int* hostMaxBitrateKbps)
 {
+    if (managedActive()) {
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("ABR is disabled on the managed path"));
+    }
     QJsonObject response = openJsonConnectionToObject(m_BaseUrlHttps,
                                                       "api/abr/capabilities",
                                                       QJsonObject(),
@@ -634,6 +955,10 @@ NvHTTP::configureAbr(bool enabled,
                      QString mode,
                      int timeoutMs)
 {
+    if (managedActive()) {
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("ABR is disabled on the managed path"));
+    }
     QJsonObject body;
     body["enabled"] = enabled;
     if (enabled) {
@@ -658,6 +983,10 @@ NvHTTP::sendAbrFeedback(double packetLoss,
                         int currentBitrateKbps,
                         int timeoutMs)
 {
+    if (managedActive()) {
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("ABR is disabled on the managed path"));
+    }
     QJsonObject body;
     body["packetLoss"] = packetLoss;
     body["rttMs"] = rttMs;
@@ -684,20 +1013,47 @@ NvHTTP::openConnection(QUrl baseUrl,
     // Port must be set
     Q_ASSERT(baseUrl.port(0) != 0);
 
+    // Managed: every request re-checks the shared gate at the moment it would
+    // open a connection.  A revoked/expired lease stops here, before any byte
+    // leaves the process.
+    if (managedActive()) {
+        requireManagedPermission(m_Managed->call);
+    }
+
     // Build a URL for the request
     QUrl url(baseUrl);
     url.setPath("/" + command);
 
-    // Get clientname - prefer pairname if available, otherwise use local hostname
-    QString clientname = QHostInfo::localHostName().toUtf8();
-    if (!m_Uuid.isEmpty()) {
-        QString pairname = NvComputer::getPairname(m_Uuid);
-        if (!pairname.isEmpty()) {
-            clientname = pairname;
+    // Managed path: the target is fixed by the policy.  Any attempt to reach a
+    // different host/port is refused, and clientname/pairname settings are never
+    // read (that would introduce a global identity/history dependency).
+    if (managedActive()) {
+        if (url.host() != m_Managed->endpoint.host
+            || (url.port(0) != m_Managed->endpoint.httpPort
+                && url.port(0) != m_Managed->endpoint.httpsPort)) {
+            throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                          QStringLiteral("Managed request target is not pinned"));
         }
     }
 
-    qInfo() << "clientname:" << clientname;
+    // Get clientname - prefer pairname if available, otherwise use local hostname
+    QString clientname;
+    if (!m_Managed.has_value()) {
+        clientname = QHostInfo::localHostName().toUtf8();
+        if (!m_Uuid.isEmpty()) {
+            QString pairname = NvComputer::getPairname(m_Uuid);
+            if (!pairname.isEmpty()) {
+                clientname = pairname;
+            }
+        }
+
+        qInfo() << "clientname:" << clientname;
+    }
+    else {
+        // Fixed, non-identifying label: the managed path must not disclose the
+        // local host name or read a persisted per-host pairname.
+        clientname = QStringLiteral("Kanade");
+    }
 
     // Use a placeholder UID for GFE allow them to quit games for each other.
     url.setQuery("uniqueid=" + (m_UseTrueUid ? IdentityManager::get()->getUniqueId() : "0123456789ABCDEF") +
@@ -747,7 +1103,7 @@ NvHTTP::openConnection(QUrl baseUrl,
     if (timeoutMs) {
         QTimer::singleShot(timeoutMs, &loop, &QEventLoop::quit);
     }
-    if (logLevel >= NvLogLevel::NVLL_VERBOSE) {
+    if (logLevel >= NvLogLevel::NVLL_VERBOSE && !m_Managed.has_value()) {
         qInfo() << "Executing request:" << url.toString();
     }
     loop.exec(QEventLoop::ExcludeUserInputEvents);
@@ -755,7 +1111,7 @@ NvHTTP::openConnection(QUrl baseUrl,
     // Abort the request if it timed out
     if (!reply->isFinished())
     {
-        if (logLevel >= NvLogLevel::NVLL_ERROR) {
+        if (logLevel >= NvLogLevel::NVLL_ERROR && !m_Managed.has_value()) {
             qWarning() << "Aborting timed out request for" << url.toString();
         }
         reply->abort();
@@ -783,7 +1139,7 @@ NvHTTP::openConnection(QUrl baseUrl,
     }
     if (reply->error() != QNetworkReply::NoError)
     {
-        if (logLevel >= NvLogLevel::NVLL_ERROR) {
+        if (logLevel >= NvLogLevel::NVLL_ERROR && !m_Managed.has_value()) {
             qWarning() << command << "request failed with error:" << reply->error();
         }
 
@@ -792,7 +1148,12 @@ NvHTTP::openConnection(QUrl baseUrl,
             delete reply;
             throw exception;
         } else {
-            QtNetworkReplyException exception(reply->error(), reply->errorString());
+            // Managed: never surface the transport-supplied error text (it can
+            // echo request material).  A fixed reason fails the call closed.
+            QtNetworkReplyException exception(
+                reply->error(),
+                m_Managed.has_value() ? QStringLiteral("Managed host request failed")
+                                      : reply->errorString());
             delete reply;
             throw exception;
         }
@@ -838,6 +1199,14 @@ NvHTTP::openJsonConnection(QUrl baseUrl,
 {
     // Port must be set
     Q_ASSERT(baseUrl.port(0) != 0);
+
+    // Managed JSON calls are refused outright (ABR/extension slots); the early
+    // guards above already throw, so reaching here with a policy is a bug and
+    // must not silently continue.
+    if (managedActive()) {
+        throw QtNetworkReplyException(QNetworkReply::OperationCanceledError,
+                                      QStringLiteral("JSON host API is disabled on the managed path"));
+    }
 
     QUrl url(baseUrl);
     url.setPath("/" + command);

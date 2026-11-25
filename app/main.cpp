@@ -87,6 +87,7 @@ static QString getStartupApplicationDir(const char* argv0)
 #include "gui/appmodel.h"
 #include "backend/autoupdatechecker.h"
 #include "backend/computermanager.h"
+#include "backend/kanade/kanadecontroller.h"
 #include "backend/systemproperties.h"
 #include "backend/usbforwardingenvironment.h"
 #include "backend/usbforwardingbackend.h"
@@ -362,6 +363,7 @@ static QString prepareLogDirectory()
 #include <io.h>
 
 static volatile LONG s_HitUnhandledException = 0;
+static volatile LONG s_KanadeSensitiveProcess = 0;
 static WCHAR s_CrashDumpDirectory[MAX_PATH] = {};
 static WCHAR s_CrashLogFileName[MAX_PATH] = {};
 static WCHAR s_CrashBuildVersion[128] = {};
@@ -516,6 +518,13 @@ LONG WINAPI UnhandledExceptionHandler(struct _EXCEPTION_POINTERS *ExceptionInfo)
     // Only write a dump for the first unhandled exception
     if (InterlockedCompareExchange(&s_HitUnhandledException, 1, 0) != 0) {
         return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // No process memory in app-generated crash artifacts once an online
+    // credential may have existed (allocator copies can outlive logout).
+    if (InterlockedCompareExchange(&s_KanadeSensitiveProcess, 0, 0) != 0) {
+        appendCrashDiagnostic(L"[crash] Memory dump suppressed for online credentials.\r\n");
+        return EXCEPTION_EXECUTE_HANDLER;
     }
 
     const EXCEPTION_RECORD* exceptionRecord = ExceptionInfo ? ExceptionInfo->ExceptionRecord : nullptr;
@@ -1351,6 +1360,31 @@ int main(int argc, char *argv[])
     // Register our C++ types for QML
     qmlRegisterType<ComputerModel>("ComputerModel", 1, 0, "ComputerModel");
     qmlRegisterType<AppModel>("AppModel", 1, 0, "AppModel");
+#ifdef Q_OS_WIN32
+    const auto kanadeLabConfig = parser.kanadeLabConfigPath();
+#endif
+    qmlRegisterSingletonType<KanadeController>("Kanade", 1, 0, "KanadeController",
+                                               [
+#ifdef Q_OS_WIN32
+                                                kanadeLabConfig
+#endif
+                                               ](QQmlEngine*, QJSEngine*) -> QObject* {
+                                                   auto* controller = new KanadeController();
+#ifdef Q_OS_WIN32
+                                                   QObject::connect(controller,
+                                                       &KanadeController::sensitiveOperationStarted,
+                                                       controller, [] {
+                                                           InterlockedExchange(&s_KanadeSensitiveProcess, 1);
+                                                       }, Qt::DirectConnection);
+                                                   if (!kanadeLabConfig.isEmpty() &&
+                                                       !controller->configureManagedRuntimeFromFile(
+                                                           QStringLiteral("D:/Github/RemoteAPP/.cache/kanade-rem2"),
+                                                           kanadeLabConfig)) {
+                                                       qWarning("REM-2: lab configuration refused");
+                                                   }
+#endif
+                                                   return controller;
+                                               });
     qmlRegisterUncreatableType<Session>("Session", 1, 0, "Session", "Session cannot be created from QML");
     qmlRegisterSingletonType<ComputerManager>("ComputerManager", 1, 0,
                                               "ComputerManager",

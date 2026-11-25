@@ -650,6 +650,26 @@ ApplicationWindow {
                 }
             }
 
+            // 在线（Kanade）入口：和「手动添加主机」并列但路线完全独立 ——
+            // 在线设备不进 ComputerManager，原生 LAN 流程一行不动。
+            NavigableToolButton {
+                id: onlineButton
+                visible: stackView.currentItem instanceof PcView
+
+                iconSource: "qrc:/res/fluent/tb-online.svg"
+
+                ToolTip.delay: 1000
+                ToolTip.timeout: 3000
+                ToolTip.visible: hovered
+                ToolTip.text: qsTr("Online devices")
+
+                onClicked: navigateTo("qrc:/gui/KanadeDevices.qml", KanadeDevices)
+
+                Keys.onDownPressed: {
+                    stackView.currentItem.forceActiveFocus(Qt.TabFocusReason)
+                }
+            }
+
             NavigableToolButton {
                 property string browserUrl: ""
 

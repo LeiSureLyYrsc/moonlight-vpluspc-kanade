@@ -1,0 +1,38 @@
+{
+  "gitlink": "733025a254e6e166a4afb577cbe056c10257f950",
+  "files": {
+    "src/AudioStream.c": {
+      "before": "e48dc4fed1b11fa04ef99ed7582b796542a0137d",
+      "after": "56dac8c4e270d3224f436841478e358da9ebde8e"
+    },
+    "src/Connection.c": {
+      "before": "a19d57603b4b319844672ef30e3ea86dd9a8a186",
+      "after": "04ce672705bfe05aa976f463f53af382e2bb21a5"
+    },
+    "src/ControlStream.c": {
+      "before": "8a8d3b17c6bbd8995af3aae3d744ba401ce571ec",
+      "after": "2774a8df8c7b6e3a955e8911d72c1b36a4f66bcc"
+    },
+    "src/Limelight-internal.h": {
+      "before": "7273e611775438b53ef37478171a66dc8cb07a37",
+      "after": "0ee1e5cab4c3576dbd6aa5e39a76faf141c0450b"
+    },
+    "src/Limelight.h": {
+      "before": "10179b52dd14ea62f93f0938443087eb8a9c2e39",
+      "after": "d4b859b8f208937df86de27ef6743ddb705d04fa"
+    },
+    "src/ManagedPortPolicy.h": {
+      "before": null,
+      "after": "2f6764e1025382274e29258e9e0968679d3ed540"
+    },
+    "src/RtspConnection.c": {
+      "before": "6678f7845eace14f67f21c5af6102f699370aaa2",
+      "after": "2f2209bb423e2bd91d778bfec5c6b2eba90be976"
+    },
+    "src/VideoStream.c": {
+      "before": "5d5e6e63b7e2f8886c6ca494795d1e9ff143c163",
+      "after": "b33c323e8cfe2e87879c7942b657ac8db11a8714"
+    }
+  },
+  "patch_sha256": "4fb69d2c4d5af205e5beb6bbe959c1d7182af2f079e0c2570d77dfd3d07010ff"
+}

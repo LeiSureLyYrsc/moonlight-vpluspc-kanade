@@ -20,6 +20,8 @@
 #include "video/overlaymenupanel.h"
 #include "video/overlaymenubutton.h"
 #include "backend/usbforwardingtunnel.h"
+#include "backend/kanade/managednative.h"
+#include "backend/nvcomputer.h"
 #include "video/overlaytoast.h"
 #ifndef STEAM_LINK
 #include "micstream.h"
@@ -131,7 +133,25 @@ public:
                      StreamingPreferences *preferences = nullptr,
                      QString launchDisplayName = QString(),
                      std::optional<bool> launchUseVdd = std::nullopt);
+
+    // Managed (Kanade online) session.  Every dial target, the certificate and
+    // the lease come from the immutable bundle; m_Computer stays null so no LAN
+    // state (activeAddress, history, UUID merge, clientname) is reachable.
+    // A managed Session refuses to start unless the gate reports ready now.
+    explicit Session(const Kanade::ManagedNativeStream& stream,
+                     NvApp& app,
+                     StreamingPreferences *preferences = nullptr);
+
     virtual ~Session();
+
+    // True for a Session created from a ManagedNativeStream.
+    bool isManaged() const { return m_Managed.has_value(); }
+
+    // Builds the isolated projection used for display/validation only.  Strict:
+    // the pinned certificate is required, the address is the locked loopback and
+    // the HTTPS port is the locked 47984.  Returns false and leaves m_Computer
+    // null when the bundle is not valid.
+    bool buildManagedComputerProjection();
 
     Q_INVOKABLE bool initialize(QQuickWindow* qtWindow);
     Q_INVOKABLE void start();
@@ -216,6 +236,22 @@ private:
 
     // Emit the appropriate error dialog for a connection termination code.
     void displayTerminationError(int errorCode);
+
+    // Managed connection start: launch/resume through the policy-scoped NvHTTP,
+    // strict RTSP check, then LiStartConnection with the fixed endpoint.  Every
+    // step re-asks the shared gate, so a revoked/expired lease aborts before a
+    // socket is opened.
+    bool startManagedConnectionAsync();
+
+    // Explicit managed stop: beginStop -> one gate-checked quitApp -> finishStop.
+    // Returns false when the gate refused to start a stop (already dead or
+    // already stopping), in which case nothing was sent.
+    bool stopManagedHostApp();
+
+    // Managed variant: same classification, but no failing-port list, no
+    // firewall/port-forwarding hint and no reachability probe.  The owner
+    // runtime, not the user, is responsible for diagnosing the transport.
+    void displayManagedTerminationError(int errorCode);
 
     bool validateLaunch(SDL_Window* testWindow);
 
@@ -390,6 +426,21 @@ private:
     DECODER_RENDERER_CALLBACKS m_VideoCallbacks;
     AUDIO_RENDERER_CALLBACKS m_AudioCallbacks;
     NvComputer* m_Computer;
+    // Engaged only for a managed Session.  ManagedEndpointContext has no default
+    // constructor, so the bundle is optional rather than a member value.
+    std::optional<Kanade::ManagedNativeStream> m_Managed;
+    // Managed sessions own a PRIVATE, detached NvComputer projection: it exists
+    // only because the stock Session reads host fields (name, codec support,
+    // cert, pair state) during validation, window naming and teardown.  It is
+    // never given to ComputerManager, never serialized, never participates in
+    // discovery/UUID merging, and - critically - NO network call is ever built
+    // from it: every managed dial goes through Kanade::ManagedNativePolicy.
+    // Declared after m_Managed (built from it) and before m_ManagedPortBridge.
+    std::unique_ptr<NvComputer> m_ManagedComputer;
+    // Backing state for the common-c pre-send validator.  Must outlive the
+    // connection, so it is a Session member: it stays valid from
+    // LiStartConnectionWithPortPolicy() until LiStopConnection().
+    Kanade::ManagedPortPolicyBridge m_ManagedPortBridge;
     NvApp m_App;
     QString m_LaunchDisplayName;
     QString m_ClientDisplayName;

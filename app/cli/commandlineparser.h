@@ -23,9 +23,15 @@ public:
 
     // True when this process was started with --disable-ui-gamepad.
     bool disableGamepadUiNavigation() const;
+#ifdef Q_OS_WIN
+    QString kanadeLabConfigPath() const { return m_KanadeLabConfigPath; }
+#endif
 
 private:
     bool m_DisableGamepadUiNavigation;
+#ifdef Q_OS_WIN
+    QString m_KanadeLabConfigPath;
+#endif
 };
 
 class QuitCommandLineParser

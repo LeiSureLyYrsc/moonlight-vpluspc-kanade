@@ -1,4 +1,4 @@
-QT += core quick network quickcontrols2 svg widgets gui-private
+QT += core concurrent quick network quickcontrols2 svg widgets gui-private
 !config_SL: QT += multimedia
 CONFIG += c++17
 
@@ -67,7 +67,7 @@ win32 {
     }
 
     INCLUDEPATH += $$PWD/../libs/windows/include
-    LIBS += ws2_32.lib winmm.lib dxva2.lib ole32.lib uuid.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib advapi32.lib
+    LIBS += ws2_32.lib winmm.lib dxva2.lib ole32.lib uuid.lib gdi32.lib user32.lib d3d9.lib dwmapi.lib dbghelp.lib advapi32.lib crypt32.lib
 }
 macx:!disable-prebuilts {
     !exists($$PWD/../libs/mac) {
@@ -236,6 +236,15 @@ SOURCES += \
     backend/nvhttp.cpp \
     backend/nvpairingmanager.cpp \
     backend/computermanager.cpp \
+    backend/kanade/kanadeapi.cpp \
+    backend/kanade/kanadecontroller.cpp \
+    backend/kanade/kanadehttptransport.cpp \
+    backend/kanade/kanadeidentity.cpp \
+    backend/kanade/kanaderuntime.cpp \
+    backend/kanade/kanadesession.cpp \
+    backend/kanade/kanadesidecar.cpp \
+    backend/kanade/managedendpoint.cpp \
+    backend/kanade/managednativecontroller.cpp \
     backend/boxartmanager.cpp \
     backend/richpresencemanager.cpp \
     cli/commandlineparser.cpp \
@@ -314,6 +323,16 @@ HEADERS += \
     backend/usbforwardingcapability.h \
     backend/nvpairingmanager.h \
     backend/computermanager.h \
+    backend/kanade/kanadeapi.h \
+    backend/kanade/kanadecontroller.h \
+    backend/kanade/kanadehttptransport.h \
+    backend/kanade/kanadeidentity.h \
+    backend/kanade/kanaderuntime.h \
+    backend/kanade/kanadesession.h \
+    backend/kanade/kanadesidecar.h \
+    backend/kanade/managedendpoint.h \
+    backend/kanade/managednative.h \
+    backend/kanade/managednativecontroller.h \
     backend/boxartmanager.h \
     backend/richpresencemanager.h \
     cli/commandlineparser.h \
