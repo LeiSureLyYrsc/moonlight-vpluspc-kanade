@@ -10,7 +10,9 @@ permissions:
 
 jobs:
   qml:
-    runs-on: ubuntu-latest
+    # Use Qt 6.11's supported LTS host; ubuntu-latest can move to an image
+    # whose APT sources cannot supply the Qt runtime dependencies.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
