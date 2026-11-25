@@ -756,7 +756,7 @@ bool isDirectChildFinalPath(const QString& childFinal, const QString& parentFina
     if (childFinal.size() <= prefix.size()) {
         return false;
     }
-    if (childFinal.compare(0, prefix.size(), prefix, Qt::CaseInsensitive) != 0) {
+    if (childFinal.left(prefix.size()).compare(prefix, Qt::CaseInsensitive) != 0) {
         return false;
     }
     const QString rest = childFinal.mid(prefix.size());
@@ -1492,7 +1492,7 @@ bool replaceIdentityFile(const PinnedDirectory& root, const QString& fileName,
     for (int i = 0; i < 4; ++i) {
         suffix += QByteArray::number(static_cast<qulonglong>(QRandomGenerator::global()->generate()),
                                      16)
-                      .rightJustified(8, QLatin1Char('0'));
+                      .rightJustified(8, '0');
     }
     const QString tempName = fileName + QStringLiteral(".tmp-") + QString::fromLatin1(suffix);
 
