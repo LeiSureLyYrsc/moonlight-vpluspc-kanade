@@ -637,7 +637,7 @@ void KanadeIdentityWin32Test::reparseRootIsRejected()
 {
     ScratchRoot dir;
     KANADE_REQUIRE_SCRATCH(dir);
-    QVERIFY(dir.isValid());
+    QVERIFY(dir.valid());
 
     const QString target = dir.path() + QStringLiteral("/real-root");
     const QString link = dir.path() + QStringLiteral("/linked-root");
