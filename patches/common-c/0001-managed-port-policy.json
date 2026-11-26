@@ -23,7 +23,7 @@
     },
     "src/ManagedPortPolicy.h": {
       "before": null,
-      "after": "2f6764e1025382274e29258e9e0968679d3ed540"
+      "after": "7b2bf84327a3b752b82bda40559edeca47dd4aa2"
     },
     "src/RtspConnection.c": {
       "before": "6678f7845eace14f67f21c5af6102f699370aaa2",
@@ -34,5 +34,5 @@
       "after": "b33c323e8cfe2e87879c7942b657ac8db11a8714"
     }
   },
-  "patch_sha256": "4fb69d2c4d5af205e5beb6bbe959c1d7182af2f079e0c2570d77dfd3d07010ff"
+  "patch_sha256": "9ef38f315cf4c206cb29933e331ec18f1de21a02d16c7187a55f3848d18c9bac"
 }

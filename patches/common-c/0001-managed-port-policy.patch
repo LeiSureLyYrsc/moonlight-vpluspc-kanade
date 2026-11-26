@@ -235,10 +235,10 @@ index 10179b52dd14ea62f93f0938443087eb8a9c2e39..d4b859b8f208937df86de27ef6743ddb
  
 diff --git a/src/ManagedPortPolicy.h b/src/ManagedPortPolicy.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..2f6764e1025382274e29258e9e0968679d3ed540
+index 0000000000000000000000000000000000000000..7b2bf84327a3b752b82bda40559edeca47dd4aa2
 --- /dev/null
 +++ b/src/ManagedPortPolicy.h
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,23 @@
 +#ifndef LIMELIGHT_MANAGED_PORT_POLICY_H
 +#define LIMELIGHT_MANAGED_PORT_POLICY_H
 +#include <stdbool.h>
@@ -253,6 +253,8 @@ index 0000000000000000000000000000000000000000..2f6764e1025382274e29258e9e096867
 +// Passed by value into the single existing common-c run. The context is
 +// caller-owned and must outlive LiStopConnection (including joined workers).
 +// isLive must be synchronous, nonblocking, thread-safe and never throw.
++
++// Include at file scope so Limelight.h can see the global ABI type.
 +typedef struct _LI_MANAGED_PORT_POLICY {
 +    int enable;
 +    uint16_t videoPort, controlPort, audioPort;

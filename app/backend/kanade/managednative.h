@@ -14,6 +14,15 @@
 
 #include "managedendpoint.h"
 
+// Include this at file scope: the header guard would otherwise hide the
+// global policy type from Limelight.h when this header is included first.
+#if defined(__has_include)
+#  if __has_include(<ManagedPortPolicy.h>)
+#    define KANADE_HAS_MANAGED_PORT_POLICY_HEADER 1
+#    include <ManagedPortPolicy.h>
+#  endif
+#endif
+
 // Kanade online-mode managed NATIVE gate (client side).
 //
 // This is the typed, single-owner gate between a verified managed runtime
@@ -195,12 +204,6 @@ inline qint64 managedMonotonicNowMs()
 // Managed path MUST pass a non-NULL policy; a NULL policy on the managed path is
 // rejected by this client before the call.  Ordinary LAN keeps calling plain
 // LiStartConnection() only.
-#if defined(__has_include)
-#  if __has_include(<ManagedPortPolicy.h>)
-#    define KANADE_HAS_MANAGED_PORT_POLICY_HEADER 1
-#    include <ManagedPortPolicy.h>
-#  endif
-#endif
 
 // Owner sets this once the callback is part of the built struct.  Both the
 // header AND this macro are required; either alone keeps the path closed, and
