@@ -1460,10 +1460,10 @@ bool Session::buildManagedComputerProjection()
     return true;
 }
 
-void Session::stopManagedHostApp()
+bool Session::stopManagedHostApp()
 {
     if (!m_Managed.has_value() || !m_Managed->gate) {
-        return;
+        return false;
     }
     Kanade::ManagedNativeStream& stream = *m_Managed;
     const qint64 now = Kanade::managedMonotonicNowMs();
@@ -1471,7 +1471,7 @@ void Session::stopManagedHostApp()
     Kanade::NativeResult stopReason;
     if (!stream.gate->beginStop(now, &stopReason)) {
         // Already dead or already stopping: nothing further may be sent.
-        return;
+        return false;
     }
 
     try {
@@ -1493,6 +1493,7 @@ void Session::stopManagedHostApp()
     }
 
     stream.gate->finishStop();
+    return true;
 }
 
 Session::~Session()
