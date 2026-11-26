@@ -938,10 +938,10 @@ bool pathContainsReparsePoint(const QString& absolutePath)
     return false;
 }
 
-// Volume GUID (not a drive letter) for an existing directory path, or empty.
-QString volumeGuid(const QString& directory)
+// Volume GUID (not a drive letter) for a volume mount point, or empty.
+QString volumeGuid(const QString& mountPoint)
 {
-    QString path = nativePath(directory);
+    QString path = nativePath(mountPoint);
     if (!path.endsWith(QLatin1Char('\\'))) {
         path += QLatin1Char('\\');
     }
@@ -1013,7 +1013,9 @@ bool approvedLocalRoot(const QString& approvedRoot, QString& out)
         return false;
     }
     const QString systemGuid = volumeGuid(systemRoot);
-    const QString candidateGuid = volumeGuid(clean);
+    // Query the drive mount point, not the store directory (which may not
+    // exist yet). The store path is checked separately below and while pinned.
+    const QString candidateGuid = volumeGuid(volume);
     if (systemGuid.isEmpty() || candidateGuid.isEmpty() || systemGuid == candidateGuid) {
         return false; // never the volume that hosts Windows
     }

@@ -109,6 +109,8 @@ jobs:
         env:
           JOM_MAX_CPUS: '2'
           QT_QPA_PLATFORM: offscreen
+          # QtTest otherwise sends its plain output to the debugger on a headless Windows runner.
+          QT_FORCE_STDERR_LOGGING: '1'
         run: |
           set "PATH=%CD%\libs\windows\lib\x64;%PATH%"
           call scripts\run-test.bat kanade_control kanade_control_test
