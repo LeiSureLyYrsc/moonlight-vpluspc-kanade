@@ -18,7 +18,7 @@ using Kanade::ManagedEndpointSpec;
 using Kanade::ValidationReason;
 using Kanade::ValidationResult;
 
-const QString kHostId = QStringLiteral("11111111-1111-4111-8111-111111111111");
+const QString kHostId = QStringLiteral("a1111111-1111-4111-8111-111111111111");
 const QString kGrantId = QStringLiteral("22222222-2222-4222-9222-222222222222");
 const QString kSessionId = QStringLiteral("33333333-3333-4333-a333-333333333333");
 const QString kClientInst = QStringLiteral("44444444-4444-4444-b444-444444444444");
