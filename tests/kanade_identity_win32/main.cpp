@@ -199,13 +199,24 @@ private:
                                   QDir::System,
                               QDir::DirsFirst);
         for (const QFileInfo& entry : entries) {
+            const QString entryPath = entry.absoluteFilePath();
+#ifdef Q_OS_WIN
+            if (entry.isJunction()) {
+                // A junction is a directory link, not a container: unlink the
+                // reparse point itself and never recurse into its target.  This
+                // matters when an assertion fired before the case's explicit
+                // removeJunction(), leaving the fixture planted.
+                const QString native = QDir::toNativeSeparators(entryPath);
+                RemoveDirectoryW(reinterpret_cast<LPCWSTR>(native.utf16()));
+                continue;
+            }
+#endif
             if (entry.isDir() && !entry.isSymLink()) {
-                removeTree(entry.absoluteFilePath());
+                removeTree(entryPath);
             }
             else {
-                QFile::setPermissions(entry.absoluteFilePath(),
-                                      QFile::ReadOwner | QFile::WriteOwner);
-                QFile::remove(entry.absoluteFilePath());
+                QFile::setPermissions(entryPath, QFile::ReadOwner | QFile::WriteOwner);
+                QFile::remove(entryPath);
             }
         }
         dir.rmdir(path);
@@ -276,45 +287,53 @@ QStringList daclSummary(const QString& path)
     return result;
 }
 
-// Attempts to replace a directory with a junction to another directory.
-// Returns false when the platform refuses (Developer Mode / privilege), in
-// which case the reparse case reports SKIP rather than passing silently.
+// Creates a directory junction (no reparse privilege needed, unlike
+// symlinks).  `fsutil reparsepoint` on the validation runners only exposes
+// delete/query, so mklink is used instead.  mklink requires the link path to be
+// absent; every caller creates the link's parent and the target already.
+// Returns false when the platform refuses, in which case the reparse cases
+// report SKIP rather than passing silently.
 bool createJunction(const QString& link, const QString& target)
 {
-    if (!QDir().mkpath(link)) {
+    // The operator-supplied scratch root reaches cmd.exe as text.  Reject
+    // anything cmd would expand or could use to escape the quoting (`%` is
+    // expanded even inside double quotes; a quote, CR or LF would let the path
+    // rewrite the command).  Ordinary CI paths contain none of these.
+    const auto cmdSafe = [](const QString& path) {
+        // An embedded NUL would truncate the native command line too.
+        return !path.contains(QLatin1Char('%')) && !path.contains(QLatin1Char('"')) &&
+               !path.contains(QLatin1Char('\r')) && !path.contains(QLatin1Char('\n')) &&
+               !path.contains(QLatin1Char('\0'));
+    };
+    if (!cmdSafe(link) || !cmdSafe(target)) {
         return false;
     }
-    // A junction must point at an existing directory and the link directory
-    // must be empty; fsutil accepts exactly that.
+    if (!QDir().mkpath(QFileInfo(link).absolutePath()) || QFileInfo::exists(link) ||
+        !QFileInfo(target).isDir()) {
+        return false;
+    }
     QProcess process;
     process.setProgram(QStringLiteral("cmd.exe"));
-    process.setArguments({QStringLiteral("/c"),
-                          QStringLiteral("fsutil reparsepoint create \"%1\" \"%2\"")
-                              .arg(QDir::toNativeSeparators(link),
-                                   QDir::toNativeSeparators(target))});
+    // setNativeArguments passes the already-quoted paths verbatim (setArguments
+    // would re-quote them for cmd.exe).  /v:off rules out delayed expansion.
+    process.setNativeArguments(QStringLiteral("/d /v:off /c mklink /j \"%1\" \"%2\"")
+                                   .arg(QDir::toNativeSeparators(link),
+                                        QDir::toNativeSeparators(target)));
     process.start();
     if (!process.waitForFinished(20000)) {
         process.kill();
         return false;
     }
-    return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
+    return process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0 &&
+           QFileInfo(link).isJunction();
 }
 
 bool removeJunction(const QString& link)
 {
-    QProcess process;
-    process.setProgram(QStringLiteral("cmd.exe"));
-    process.setArguments(
-        {QStringLiteral("/c"), QStringLiteral("fsutil reparsepoint delete \"%1\"")
-                                   .arg(QDir::toNativeSeparators(link))});
-    process.start();
-    if (!process.waitForFinished(20000)) {
-        process.kill();
-        return false;
-    }
-    const bool ok = process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
-    QDir().rmdir(link);
-    return ok;
+    // RemoveDirectoryW unlinks a directory junction itself and never recurses
+    // into (or deletes) the target it pointed at.
+    const QString native = QDir::toNativeSeparators(link);
+    return RemoveDirectoryW(reinterpret_cast<LPCWSTR>(native.utf16())) != FALSE;
 }
 #endif // Q_OS_WIN
 
@@ -366,6 +385,17 @@ void KanadeIdentityWin32Test::rootRulesRejectUnsafeTrees()
     QVERIFY(!Kanade::IdentityTestHooks::rootIsAccepted(QStringLiteral("relative/path")));
     QVERIFY(!Kanade::IdentityTestHooks::rootIsAccepted(QStringLiteral("//server/share/root")));
     QVERIFY(!Kanade::IdentityTestHooks::rootIsAccepted(QStringLiteral("\\\\?\\D:\\root")));
+    // Other device namespaces and drive-relative spellings are refused on the
+    // raw characters, before Qt normalization could rewrite them into a plain
+    // drive path (QDir::cleanPath strips a "\\?\" prefix on Qt 6).
+    QVERIFY(!Kanade::IdentityTestHooks::rootIsAccepted(QStringLiteral("\\\\.\\D:\\root")));
+    QVERIFY(!Kanade::IdentityTestHooks::rootIsAccepted(QStringLiteral("\\\\?\\UNC\\server\\share\\root")));
+    QVERIFY(!Kanade::IdentityTestHooks::rootIsAccepted(QStringLiteral("\\\\.\\UNC\\server\\share\\root")));
+    QVERIFY(!Kanade::IdentityTestHooks::rootIsAccepted(QStringLiteral("D:relative\\root")));
+    QVERIFY(!Kanade::IdentityTestHooks::rootIsAccepted(QStringLiteral("D:")));
+    QVERIFY(!Kanade::IdentityTestHooks::rootIsAccepted(QStringLiteral("\\\\?\\D:/root")));
+    // A bare drive root is a valid path but never a store root.
+    QVERIFY(!Kanade::IdentityTestHooks::rootIsAccepted(QStringLiteral("D:\\")));
 
     // A fixed-volume temp directory is acceptable.
     ScratchRoot dir;
@@ -389,6 +419,12 @@ void KanadeIdentityWin32Test::saveLoadRoundTrip()
     Kanade::IdentityStore store(dir.path());
     const Kanade::InstallationIdentity identity = enrolled();
 
+    // The scratch leaf was allocated but never created: the store must report
+    // NotFound (nothing stored), not Error and not a fabricated identity.
+    Kanade::InstallationIdentity absent;
+    QCOMPARE(store.loadResult(serviceOrigin(), kUserId, absent),
+             Kanade::IdentityStore::LoadResult::NotFound);
+
     QVERIFY(store.save(serviceOrigin(), kUserId, identity));
 
     Kanade::InstallationIdentity loaded;
@@ -406,6 +442,30 @@ void KanadeIdentityWin32Test::saveLoadRoundTrip()
     QCOMPARE(store.loadResult(serviceOrigin(), kUserId, reloaded),
              Kanade::IdentityStore::LoadResult::Ok);
     QCOMPARE(reloaded.privateKey, identity.privateKey);
+
+    // A genuinely distinct identity must replace the stored one atomically even
+    // while an outside reader holds the OLD envelope open, granted exactly the
+    // sharing the store itself uses.  The save result is captured, the reader
+    // released, and only then are the assertions made; the reload must yield
+    // the new key, not the old one and not a merge of the two.
+    const QString path = storeFile(dir.path(), serviceOrigin(), kUserId);
+    const QString native = QDir::toNativeSeparators(path);
+    HANDLE reader = CreateFileW(reinterpret_cast<LPCWSTR>(native.utf16()), GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    QVERIFY2(reader != INVALID_HANDLE_VALUE, "could not open the stored envelope as a reader");
+    Kanade::InstallationIdentity replacement = Kanade::generateIdentity();
+    replacement.installationId = kInstallationId;
+    const bool replacedWhileRead = store.save(serviceOrigin(), kUserId, replacement);
+    CloseHandle(reader);
+
+    QVERIFY2(replacedWhileRead, "distinct replacement must succeed while a reader holds the file");
+    Kanade::InstallationIdentity afterReplace;
+    QCOMPARE(store.loadResult(serviceOrigin(), kUserId, afterReplace),
+             Kanade::IdentityStore::LoadResult::Ok);
+    QCOMPARE(afterReplace.privateKey, replacement.privateKey);
+    QCOMPARE(afterReplace.publicKey, replacement.publicKey);
+    QVERIFY(afterReplace.privateKey != identity.privateKey);
 }
 
 void KanadeIdentityWin32Test::storedFileIsPrivateAndPlain()
@@ -643,7 +703,7 @@ void KanadeIdentityWin32Test::reparseRootIsRejected()
     const QString link = dir.path() + QStringLiteral("/linked-root");
     QVERIFY(QDir().mkpath(target));
     if (!createJunction(link, target)) {
-        QSKIP("Cannot create a junction (needs fsutil and a NTFS volume)");
+        QSKIP("Cannot create a directory junction (needs mklink on an NTFS volume)");
     }
 
     // A root reached through a junction must fail closed for save and load.
@@ -674,6 +734,12 @@ void KanadeIdentityWin32Test::reparseStoreFileIsRejected()
     Kanade::IdentityStore store(dir.path());
     const Kanade::InstallationIdentity identity = enrolled();
 
+    // Seed a DIFFERENT scope first: save() creates the root leaf itself with
+    // the private DACL, so the root is legitimate and the refusal below can
+    // only come from the junction, not from a non-private root.  (Creating the
+    // root here would leave it with an inherited ACL and make this vacuous.)
+    QVERIFY(store.save(otherOrigin(), kUserId, enrolled()));
+
     const QString path = storeFile(dir.path(), serviceOrigin(), kUserId);
     QVERIFY(!path.isEmpty());
 
@@ -682,7 +748,7 @@ void KanadeIdentityWin32Test::reparseStoreFileIsRejected()
     const QString elsewhere = dir.path() + QStringLiteral("/elsewhere");
     QVERIFY(QDir().mkpath(elsewhere));
     if (!createJunction(path, elsewhere)) {
-        QSKIP("Cannot create a junction (needs fsutil and a NTFS volume)");
+        QSKIP("Cannot create a directory junction (needs mklink on an NTFS volume)");
     }
 
     QVERIFY(!store.save(serviceOrigin(), kUserId, identity));
@@ -793,7 +859,7 @@ void KanadeIdentityWin32Test::rootReplacedInPlaceIsRejected(){
     QVERIFY(QDir().rename(root, root + QStringLiteral("-moved")));
     if (!createJunction(root, decoy)) {
         QDir().rename(root + QStringLiteral("-moved"), root);
-        QSKIP("Cannot create a junction (needs fsutil and a NTFS volume)");
+        QSKIP("Cannot create a directory junction (needs mklink on an NTFS volume)");
     }
 
     Kanade::InstallationIdentity loaded;
@@ -825,7 +891,7 @@ void KanadeIdentityWin32Test::ancestorJunctionIsRejected()
     const QString linkParent = dir.path() + QStringLiteral("/linked-ancestor");
     QVERIFY(QDir().mkpath(decoy));
     if (!createJunction(linkParent, decoy)) {
-        QSKIP("Cannot create a junction (needs fsutil and a NTFS volume)");
+        QSKIP("Cannot create a directory junction (needs mklink on an NTFS volume)");
     }
 
     // The approved root sits BELOW the junction.
@@ -866,7 +932,7 @@ void KanadeIdentityWin32Test::intermediateJunctionIsRejected()
     QVERIFY(QDir().mkpath(decoy));
     const QString link = base + QStringLiteral("/inserted");
     if (!createJunction(link, decoy)) {
-        QSKIP("Cannot create a junction (needs fsutil and a NTFS volume)");
+        QSKIP("Cannot create a directory junction (needs mklink on an NTFS volume)");
     }
 
     Kanade::IdentityStore belowLink(link + QStringLiteral("/store"));
@@ -1063,10 +1129,14 @@ void KanadeIdentityWin32Test::concurrentSaveAndLoad()
         }
     });
 
+    bool allSavesOk = true;
     for (int i = 0; i < 10; ++i) {
         identity = Kanade::generateIdentity();
         identity.installationId = kInstallationId;
-        QVERIFY(store.save(serviceOrigin(), kUserId, identity));
+        if (!store.save(serviceOrigin(), kUserId, identity)) {
+            allSavesOk = false; // record and finish, so the reader is always reaped
+            break;
+        }
     }
     stop.store(true);
     reader.waitForFinished();
@@ -1075,6 +1145,7 @@ void KanadeIdentityWin32Test::concurrentSaveAndLoad()
     // reparse-redirected or ACL-broken file: those are the only outcomes that
     // map to Error.  Every observed envelope was complete.
     QCOMPARE(corruptLoads.load(), 0);
+    QVERIFY2(allSavesOk, "every save concurrent with a reader must succeed");
     QVERIFY(okLoads.load() > 0);
 }
 

@@ -25,6 +25,7 @@
 #include <aclapi.h>
 #include <sddl.h>
 #include <wincrypt.h>
+#include <winternl.h> // NTSTATUS / IO_STATUS_BLOCK for NtSetInformationFile
 #endif
 
 // Canonical signed payload domain constants.  These MUST stay byte-identical
@@ -583,8 +584,9 @@ QByteArray signDeviceToken(const QUrl& origin,
 //     root's file id, so a swapped path component cannot redirect the I/O;
 //   * reads consume the very handle that was verified (never re-opened by
 //     path);
-//   * the atomic replace is SetFileInformationByHandle(FileRenameInfo) with
-//     RootDirectory = the pinned root handle and a bare file name;
+//   * the atomic replace is NtSetInformationFile(FileRenameInformationEx) with
+//     RootDirectory = the pinned root handle, a bare file name and POSIX
+//     replacement semantics;
 //   * forget() deletes through FileDispositionInfo on a verified handle.
 //
 // The private DACL (current user + SYSTEM, inheritance blocked) is supplied at
@@ -639,8 +641,9 @@ IdentityStore::IdentityStore(QString approvedRoot)
 //      the volume that hosts Windows (compared by GUID, not by drive letter),
 //      outside the Windows directory, and not under a mounted folder.
 //   7. Files are created with CREATE_NEW and the private DACL supplied at
-//      creation; the atomic replace is handle-relative (FileRenameInfo with
-//      RootDirectory = the pinned leaf handle and a bare file name).
+//      creation; the atomic replace is handle-relative
+//      (NtSetInformationFile(FileRenameInformationEx) with RootDirectory = the
+//      pinned leaf handle, a bare file name and POSIX replace semantics).
 //   8. No failure path mutates by path.  The rename result is verified by
 //      comparing the file id associated with the name against the id held on
 //      the still-open write handle; a mismatch disposes of that handle's object
@@ -993,11 +996,34 @@ bool volumeMountIsDriveRoot(const QString& absolutePath, const QString& volume)
 // Production additionally restricts the tree to the approved D-drive location;
 // that choice is the caller's (see kanadecontroller identityRoot()).  The store
 // enforces the properties above for whatever root it is handed.
-bool approvedLocalRoot(const QString& approvedRoot, QString& out)
+
+// Canonical drive spelling, judged on the RAW characters before any Qt path
+// normalization: "X:\..." or "X:/..." with an ASCII letter.  QDir::cleanPath()
+// goes through QDir::fromNativeSeparators(), which on Qt 6 calls
+// removeUncOrLongPathPrefix(), so "\\?\D:\root" would be rewritten into the
+// plain "D:/root" and pass a post-normalization check.  Requiring the drive
+// form up front rejects relative paths, UNC shares, drive-relative paths and
+// every device namespace spelling ("\\?\", "\\.\", "\\?\UNC\") on their
+// characters, independently of what normalization would do to them.
+bool hasCanonicalDrivePrefix(const QString& raw)
 {
-    if (approvedRoot.isEmpty() || !QDir::isAbsolutePath(approvedRoot)) {
+    if (raw.size() < 3) {
         return false;
     }
+    const QChar letter = raw.at(0);
+    const bool asciiLetter = (letter >= QLatin1Char('A') && letter <= QLatin1Char('Z')) ||
+                             (letter >= QLatin1Char('a') && letter <= QLatin1Char('z'));
+    return asciiLetter && raw.at(1) == QLatin1Char(':') &&
+           (raw.at(2) == QLatin1Char('\\') || raw.at(2) == QLatin1Char('/'));
+}
+
+bool approvedLocalRoot(const QString& approvedRoot, QString& out)
+{
+    if (approvedRoot.isEmpty() || !hasCanonicalDrivePrefix(approvedRoot) ||
+        !QDir::isAbsolutePath(approvedRoot)) {
+        return false;
+    }
+    // The post-normalization checks stay in force for the cleaned spelling.
     const QString clean = QDir::cleanPath(approvedRoot);
     if (clean.startsWith(QStringLiteral("//")) || clean.size() <= 3 ||
         clean.at(1) != QLatin1Char(':') || clean.at(2) != QLatin1Char('/')) {
@@ -1331,49 +1357,144 @@ QString childPath(const PinnedDirectory& root, const QString& fileName)
 
 // Atomic, handle-relative replace: the destination name is resolved against the
 // pinned leaf handle, so a path swap cannot redirect the write.
+//
+// SetFileInformationByHandle(FileRenameInfo) cannot express this on current
+// Windows: with a non-null RootDirectory and a bare name it fails with
+// ERROR_INVALID_PARAMETER (87).  The native call can, and
+// FileRenameInformationEx adds the POSIX replace semantics needed to swap the
+// destination while a legitimate reader holds it with FILE_SHARE_DELETE.
+// Sharing stays authoritative: a handle that did not grant FILE_SHARE_DELETE
+// makes the replace fail (STATUS_SHARING_VIOLATION), never an absolute-path
+// fallback.
+//
+// The user-mode SDK enum does not declare this class (winternl.h here has only
+// FileDirectoryInformation = 1) and has no fixed underlying type, so the class
+// travels as the raw ULONG the ABI expects; an out-of-range enum value would be
+// undefined behaviour.
+constexpr ULONG kFileRenameInformationEx = 65;
+// Microsoft FILE_RENAME_FLAGS / FILE_RENAME_INFORMATION for that class.
+constexpr ULONG kRenameReplaceIfExists = 0x00000001;
+constexpr ULONG kRenamePosixSemantics = 0x00000002;
+
+struct NativeRenameInformation {
+    ULONG Flags;
+    HANDLE RootDirectory;
+    ULONG FileNameLength;
+    WCHAR FileName[1];
+};
+
+// NtSetInformationFile from the already-loaded ntdll.dll.
+using NtSetInformationFileFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, ULONG);
+
+NtSetInformationFileFn nativeSetInformationFile()
+{
+    static const NtSetInformationFileFn function = [] {
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        if (ntdll == nullptr) {
+            return static_cast<NtSetInformationFileFn>(nullptr);
+        }
+        const FARPROC proc = GetProcAddress(ntdll, "NtSetInformationFile");
+        // A direct cast from FARPROC would be an unsafe function-pointer
+        // conversion (C4191); copying the address is the conventional route.
+        NtSetInformationFileFn resolved = nullptr;
+        static_assert(sizeof(resolved) == sizeof(proc),
+                      "FARPROC and the resolved signature share the pointer size");
+        std::memcpy(&resolved, &proc, sizeof(resolved));
+        return resolved;
+    }();
+    return function;
+}
+
 bool renameWithinRoot(HANDLE source, HANDLE rootDirectory, const QString& fileName)
 {
-    const SIZE_T nameBytes = static_cast<SIZE_T>(fileName.size()) * sizeof(wchar_t);
-    const SIZE_T total = offsetof(FILE_RENAME_INFO, FileName) + nameBytes + sizeof(wchar_t);
-    // FILE_RENAME_INFO declares ReplaceIfExists through a union whose spelling
-    // differs across SDK/compiler modes; in every layout it is the first DWORD,
-    // followed by RootDirectory and FileNameLength.
-    std::vector<unsigned char> buffer(static_cast<size_t>(total), 0);
-    const DWORD replaceIfExists = TRUE;
-    std::memcpy(buffer.data(), &replaceIfExists, sizeof(replaceIfExists));
-    auto* info = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
-    info->RootDirectory = rootDirectory;
-    info->FileNameLength = static_cast<DWORD>(nameBytes);
-    info->FileName[0] = L'\0';
-    if (!fileName.isEmpty()) {
-        // Written through the raw buffer: assigning info->FileName directly
-        // would alias the DWORD punning above.
-        std::memcpy(buffer.data() + offsetof(FILE_RENAME_INFO, FileName), fileName.utf16(),
-                    static_cast<size_t>(nameBytes));
+    if (fileName.isEmpty() || fileName.contains(QLatin1Char('/')) ||
+        fileName.contains(QLatin1Char('\\'))) {
+        return false;
     }
-    return SetFileInformationByHandle(source, FileRenameInfo, buffer.data(),
-                                      static_cast<DWORD>(buffer.size())) != FALSE;
+    const NtSetInformationFileFn setInformation = nativeSetInformationFile();
+    if (setInformation == nullptr) {
+        return false; // no handle-relative replace available: fail closed
+    }
+
+    const SIZE_T nameBytes = static_cast<SIZE_T>(fileName.size()) * sizeof(wchar_t);
+    // Same length the verified probe used: the full record (including its
+    // padding) plus the name, not the field offset plus the name.
+    const SIZE_T recordBytes = sizeof(NativeRenameInformation) + nameBytes;
+    // 8-byte aligned storage; nothing is written through a cast pointer.
+    const SIZE_T words = (recordBytes + sizeof(quint64) - 1) / sizeof(quint64);
+    std::vector<quint64> storage(words, 0);
+    auto* bytes = reinterpret_cast<unsigned char*>(storage.data());
+
+    NativeRenameInformation header = {};
+    header.Flags = kRenameReplaceIfExists | kRenamePosixSemantics;
+    header.RootDirectory = rootDirectory;
+    header.FileNameLength = static_cast<ULONG>(nameBytes);
+    std::memcpy(bytes, &header, offsetof(NativeRenameInformation, FileName));
+    std::memcpy(bytes + offsetof(NativeRenameInformation, FileName), fileName.utf16(), nameBytes);
+
+    IO_STATUS_BLOCK ioStatus = {};
+    const NTSTATUS status = setInformation(source, &ioStatus, storage.data(),
+                                           static_cast<ULONG>(recordBytes),
+                                           kFileRenameInformationEx);
+    return status == 0; // synchronous handle: STATUS_SUCCESS or nothing changed
 }
 
 enum class ChildState { Ok, Missing, Error };
 
+// POSIX replacement (FileRenameInformationEx with POSIX semantics) atomically
+// swaps the NAME but leaves a handle that was opened to the replaced object
+// pointing at that object with zero hard links and DELETE_PENDING set.  Such an
+// object must never be read: it no longer is the store's file.  Because the
+// name already denotes the replacement, discard the stale handle and reopen the
+// name under the pinned root a bounded number of times.  Any other abnormal
+// state (a failed query, more than one link, a reparse tag or a non-private
+// DACL) is an error immediately, never a retry and never "missing".
 ChildState readIdentityFile(const PinnedDirectory& root, const QString& fileName, QByteArray& out)
 {
-    ScopedHandle child(CreateFileW(wide(childPath(root, fileName)),
-                                   GENERIC_READ | READ_CONTROL | SYNCHRONIZE |
-                                       FILE_READ_ATTRIBUTES,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                   nullptr, OPEN_EXISTING,
-                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-                                   nullptr));
-    if (!child.valid()) {
-        const DWORD error = GetLastError();
-        return (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) ? ChildState::Missing
-                                                                               : ChildState::Error;
-    }
-    if (!plainObject(child.get()) || !hasSingleLink(child.get()) ||
-        !aclIsPrivateHandle(child.get())) {
-        return ChildState::Error;
+    constexpr int kMaxOpenAttempts = 4;
+    ScopedHandle child;
+    for (int attempt = 0; attempt < kMaxOpenAttempts; ++attempt) {
+        child.reset(CreateFileW(wide(childPath(root, fileName)),
+                                GENERIC_READ | READ_CONTROL | SYNCHRONIZE |
+                                    FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                                nullptr));
+        if (!child.valid()) {
+            const DWORD error = GetLastError();
+            return (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+                       ? ChildState::Missing
+                       : ChildState::Error;
+        }
+        // The object itself is inspected on the handle just opened, before any
+        // metadata from it is trusted.
+        if (!plainObject(child.get())) {
+            return ChildState::Error;
+        }
+        FILE_STANDARD_INFO standard = {};
+        if (!GetFileInformationByHandleEx(child.get(), FileStandardInfo, &standard,
+                                          sizeof(standard))) {
+            return ChildState::Error; // unverifiable object: fail closed
+        }
+        if (standard.NumberOfLinks == 0) {
+            // Replaced underneath this open: drop the reader and reopen the
+            // name, while attempts remain.  Anything else is an error, never a
+            // retry and never "missing".
+            if (standard.DeletePending != FALSE && attempt + 1 < kMaxOpenAttempts) {
+                child.reset();
+                continue;
+            }
+            return ChildState::Error; // a zero-link object is never the store file
+        }
+        if (standard.NumberOfLinks != 1) {
+            return ChildState::Error;
+        }
+        // DACL is verified on the very handle that will be read.
+        if (!aclIsPrivateHandle(child.get())) {
+            return ChildState::Error;
+        }
+        break; // accepted: this is the handle the payload is read from
     }
     LARGE_INTEGER size = {};
     if (!GetFileSizeEx(child.get(), &size) || size.QuadPart <= 0 ||
