@@ -7,9 +7,8 @@
 
 // Regression tests for the immutable managed endpoint context.
 //
-// Everything here is pure validation: no socket, no TLS session, no live
-// NvHTTP/Session object, no clock read.  The "trusted monotonic now" is a test
-// constant.
+// No sockets, TLS sessions, or live NvHTTP/Session objects. Tests that
+// supply their own monotonic instant use a fixed fixture time.
 
 namespace {
 
@@ -24,7 +23,7 @@ const QString kSessionId = QStringLiteral("33333333-3333-4333-a333-333333333333"
 const QString kClientInst = QStringLiteral("44444444-4444-4444-b444-444444444444");
 const QString kHostInst = QStringLiteral("55555555-5555-4555-8555-555555555555");
 
-// Trusted monotonic instant used by every case (ms).
+// Synthetic monotonic instant for checks that take an explicit now (ms).
 constexpr qint64 kNow = 1000000;
 
 ManagedEndpointSpec validSpec()
@@ -846,8 +845,11 @@ private slots:
         Kanade::ManagedPortPolicyBridge empty;
         QVERIFY(!Kanade::managedPortIsLive(&empty));
 
+        // The callback reads the production monotonic clock (system uptime
+        // on Windows), so its guard must use that clock, not kNow.
+        const qint64 now = Kanade::managedMonotonicNowMs();
         Kanade::NativeResult why;
-        auto guard = Kanade::LiveLeaseGuard::create(kSessionId, 7, kNow + 60000, kNow, 90000, &why);
+        auto guard = Kanade::LiveLeaseGuard::create(kSessionId, 7, now + 60000, now, 90000, &why);
         QVERIFY(guard != nullptr);
 
         Kanade::ManagedPortPolicyBridge bridge;
@@ -869,17 +871,16 @@ private slots:
         QVERIFY(!Kanade::managedPortIsLive(&bridge));
 
         // Lease expiry alone (no revoke) also refuses.
+        const qint64 freshNow = Kanade::managedMonotonicNowMs();
         auto expiring =
-            Kanade::LiveLeaseGuard::create(kSessionId, 7, kNow + 1000, kNow, 90000, &why);
+            Kanade::LiveLeaseGuard::create(kSessionId, 7, freshNow + 1000, freshNow, 90000, &why);
         QVERIFY(expiring != nullptr);
         Kanade::ManagedPortPolicyBridge fresh;
         fresh.lease = expiring;
         fresh.runGeneration = 7;
         fresh.sessionId = kSessionId;
         QVERIFY(Kanade::managedPortIsLive(&fresh));
-        // The guard snapshot used inside the callback reads the real clock, so
-        // this only proves the callback is not a constant true/false.
-        QVERIFY(Kanade::managedPortPolicyAvailable() == Kanade::managedPortPolicyAvailable());
+        QTRY_VERIFY_WITH_TIMEOUT(!Kanade::managedPortIsLive(&fresh), 5000);
     }
 
     void nativeReasonNamesAreStableAndNonSecret()
