@@ -39,7 +39,10 @@ class StreamingPreferences;
 //   4. fetchAppList(apps)                   -> native applist
 //   5. runtimeReady(proof)                  -> gate.markReady(); stream may build
 //   6. createSession(app, prefs, &out)      -> returns a managed Session
-//   7. renewLease(deadlineMs)               -> forward-only lease extension
+//   7. tickLease(deadlineMs)                -> 1 s watchdog observation; a
+//                                              repeated deadline is "no news",
+//                                              not a failure (renewLease stays
+//                                              the strict extension primitive)
 //   8. stop() / revoke(reason)              -> terminal
 //
 // EXACT NATIVE OPERATIONS the runtime/controller must be able to serve, all on
@@ -202,6 +205,51 @@ public:
             return refuse(reasonOut, NativeReason::AlreadyArmed,
                           "runtime binding is only accepted after begin()");
         }
+        if (!m_lease) {
+            return refuse(reasonOut, NativeReason::LeaseMissing, "no managed lease is held");
+        }
+        // The gate refuses a lease deadline AHEAD of the context it arms with.
+        // Kanade confirms a later lease roughly every 30 s while the 1 s tick is
+        // the only thing that advances the shared guard, so a confirmation can
+        // land between two ticks.  Bring the context forward FIRST, using the
+        // existing strict ManagedEndpointContext::renewed(): it rejects an
+        // equal/lower deadline, a foreign run/session, an elapsed lease and an
+        // over-cap span, so this can only ever follow a real confirmation.
+        const LiveLeaseSnapshot lease = m_lease->snapshot(managedMonotonicNowMs());
+        if (!lease.live) {
+            failNow(lease.deadReason == NativeReason::Ok ? NativeReason::LeaseExpired
+                                                         : lease.deadReason);
+            if (reasonOut) {
+                *reasonOut = m_failureReason;
+            }
+            return false;
+        }
+        if (lease.sessionId != m_context->sessionId()
+            || lease.generation != m_context->runGeneration()) {
+            failNow(NativeReason::LeaseGenerationMismatch);
+            if (reasonOut) {
+                *reasonOut = m_failureReason;
+            }
+            return false;
+        }
+        if (lease.deadlineMs > m_context->confirmedDeadlineMs()) {
+            ValidationResult refreshWhy;
+            const auto refreshed =
+                m_context->renewed(lease.deadlineMs, managedMonotonicNowMs(),
+                                   m_context->sessionId(), m_context->runGeneration(), refreshWhy);
+            if (!refreshed) {
+                // A confirmation that cannot be adopted is not a usable lease:
+                // fail closed instead of arming on a context that disagrees with
+                // the shared guard.
+                failNow(NativeReason::LeaseDeadlineInvalid);
+                if (reasonOut) {
+                    *reasonOut = m_failureReason;
+                }
+                return false;
+            }
+            m_context = refreshed;
+        }
+
         const NativeResult result = m_gate->arm(*m_context, m_lease, binding, managedMonotonicNowMs());
         if (!result.ok()) {
             failNow(result.reason);
@@ -254,7 +302,59 @@ public:
     bool runtimeReady(const ReadyProof& proof, QString* reasonOut = nullptr);
     Session* createSession(NvApp& app, StreamingPreferences* preferences,
                           QString* reasonOut = nullptr);
+
+    // Step 7a.  Strict forward-only renewal from a confirmed lease response.
+    // Rejects an equal/lower deadline: use tickLease() for the 1 s watchdog,
+    // which treats a repeat as "no news" instead of a failure.
     bool renewLease(qint64 newDeadlineMs, QString* reasonOut = nullptr);
+
+    // Step 7b.  The 1 s watchdog tick, fed the absolute deadline most recently
+    // CONFIRMED by Kanade (KanadeSession::leaseDeadlineMonotonicMs()).
+    //
+    // The confirmed deadline only advances when the server confirms a later
+    // lease (roughly every 30 s), while this is called every second, so an
+    // unchanged deadline is the NORMAL case and MUST NOT fail the run.
+    // LiveLeaseGuard::observe() therefore treats an equal deadline for a live,
+    // matching run as a successful no-op while keeping every strict rule
+    // (lower deadline, wrong identity, elapsed lease, cap violation, dead
+    // guard) fail-closed.
+    //
+    // Defined inline so the offline fixture exercises this exact production
+    // decision without linking NvHTTP/Session.
+    bool tickLease(qint64 confirmedDeadlineMs, QString* reasonOut = nullptr)
+    {
+        if (!m_lease || !m_context) {
+            // Plain "no lease held" read, not a death: a gate that needs a
+            // lease already refuses through its own state.
+            return refuse(reasonOut, NativeReason::LeaseMissing, "no managed lease is held");
+        }
+        // A tick after the run is already terminal must not resurrect anything.
+        if (m_state == State::Failed || m_state == State::Stopped) {
+            return refuse(reasonOut,
+                          m_lease->deadReason() == NativeReason::Ok ? NativeReason::Stopped
+                                                                   : m_lease->deadReason(),
+                          "the managed run is already finished");
+        }
+
+        NativeResult why;
+        if (!m_lease->observe(managedMonotonicNowMs(), confirmedDeadlineMs,
+                              m_context->runGeneration(), m_context->sessionId(), &why)) {
+            // Expired/revoked, a foreign run, a LOWER deadline, or an over-cap
+            // confirmation: terminal and fail closed, exactly as a failed
+            // extension was always treated.
+            failNow(why.reason);
+            if (reasonOut) {
+                *reasonOut = m_failureReason;
+            }
+            return false;
+        }
+
+        if (reasonOut) {
+            reasonOut->clear();
+        }
+        return true;
+    }
+
     void stop();
     void revoke(NativeReason reason);
 

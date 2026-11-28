@@ -473,6 +473,43 @@ public:
         return true;
     }
 
+    // Periodic observation for a watchdog that polls faster than the server
+    // confirms.  It differs from extend() in exactly ONE case: a confirmation
+    // that EQUALS the deadline already held, on a guard that is still live and
+    // for this same run/session, is a successful no-op (nothing moves, epoch
+    // unchanged) - on a short cadence that repeat means "no news yet", not a
+    // failed renewal.
+    //
+    // It is not a weaker gate.  Every other case - already dead, foreign run
+    // generation/session, unusable clock, elapsed lease, a LOWER deadline, a
+    // deadline not strictly in the future, or one beyond the cap - is handed to
+    // the SAME strict extend() above, so all of them still fail closed with the
+    // identical reasons.
+    bool observe(qint64 nowMs,
+                 qint64 confirmedDeadlineMs,
+                 quint64 expectedGeneration,
+                 const QString& expectedSessionId,
+                 NativeResult* reason = nullptr)
+    {
+        // Check the one benign case under the lock, then hand every other case
+        // to the strict body (which re-takes the lock and re-checks death, so a
+        // revoke landing in between still fails closed).
+        {
+            QMutexLocker locker(&m_mutex);
+            if (confirmedDeadlineMs == m_deadlineMs
+                && m_deadReason == NativeReason::Ok
+                && expectedGeneration != 0 && expectedGeneration == m_generation
+                && expectedSessionId == m_sessionId
+                && nowMs >= 0 && nowMs < m_deadlineMs) {
+                if (reason) {
+                    *reason = NativeResult{};
+                }
+                return true;
+            }
+        }
+        return extend(nowMs, confirmedDeadlineMs, expectedGeneration, expectedSessionId, reason);
+    }
+
     // Permanent, idempotent death.  Bumps epoch and records the reason once.
     void revoke(NativeReason reason)
     {

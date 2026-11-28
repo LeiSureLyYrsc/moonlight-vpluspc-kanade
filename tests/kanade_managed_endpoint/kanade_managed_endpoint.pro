@@ -14,4 +14,5 @@ SOURCES += \
 
 HEADERS += \
     ../../app/backend/kanade/managedendpoint.h \
-    ../../app/backend/kanade/managednative.h
+    ../../app/backend/kanade/managednative.h \
+    ../../app/backend/kanade/managednativecontroller.h

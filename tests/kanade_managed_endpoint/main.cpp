@@ -1,5 +1,6 @@
 #include "backend/kanade/managedendpoint.h"
 #include "backend/kanade/managednative.h"
+#include "backend/kanade/managednativecontroller.h"
 
 #include <QtTest>
 
@@ -835,6 +836,244 @@ private slots:
         QCOMPARE(endpoint.host, QStringLiteral("127.0.0.1"));
         QCOMPARE(endpoint.httpPort, quint16(47989));
         QCOMPARE(endpoint.httpsPort, quint16(47984));
+    }
+
+    // --- 1 s watchdog: a repeated confirmed deadline is NOT a failure -------
+    //
+    // P0 regression.  onLeaseTick() fires every second and hands over
+    // KanadeSession::leaseDeadlineMonotonicMs(), which only advances when the
+    // server confirms a later lease (~every 30 s).  The old controller path
+    // treated that repeated deadline as a failed forward extension
+    // (LeaseNotExtended), called failNow() and revoked the whole run one second
+    // after it went live.
+    //
+    // These cases drive the REAL production decision, LiveLeaseGuard::observe()
+    // via ManagedNativeController::tickLease(), not a reimplementation of it.
+    void leaseObserveRepeatedDeadlineIsANoOp()
+    {
+        Kanade::NativeResult why;
+        auto guard = Kanade::LiveLeaseGuard::create(kSessionId, 7, kNow + 60000, kNow, 90000, &why);
+        QVERIFY(guard != nullptr);
+        const quint64 epochBefore = guard->epoch();
+
+        // Thirty ticks at the 1 s cadence against a 30 s confirmation: all
+        // succeed, nothing moves, and the guard stays live and healthy.
+        for (int i = 0; i < 30; ++i) {
+            why = Kanade::NativeResult{};
+            QVERIFY2(guard->observe(kNow + i * 1000, kNow + 60000, 7, kSessionId, &why),
+                     qPrintable(why.detail));
+            QVERIFY(why.ok());
+            QVERIFY(why.detail.isEmpty());
+            QCOMPARE(guard->epoch(), epochBefore);
+            QCOMPARE(guard->snapshot(kNow + i * 1000).deadlineMs, kNow + 60000);
+            QVERIFY(guard->isLive(kNow + i * 1000));
+            QCOMPARE(int(guard->deadReason()), int(Kanade::NativeReason::Ok));
+        }
+    }
+
+    void leaseObserveExtendsExactlyOnce()
+    {
+        Kanade::NativeResult why;
+        auto guard = Kanade::LiveLeaseGuard::create(kSessionId, 7, kNow + 60000, kNow, 90000, &why);
+        QVERIFY(guard != nullptr);
+        const quint64 epochBefore = guard->epoch();
+
+        // A strictly later confirmed deadline is the one case that moves.
+        QVERIFY2(guard->observe(kNow + 30000, kNow + 90000, 7, kSessionId, &why),
+                 qPrintable(why.detail));
+        QVERIFY(guard->epoch() > epochBefore);
+        QCOMPARE(guard->snapshot(kNow + 30000).deadlineMs, kNow + 90000);
+
+        // Re-observing that same deadline is a no-op again, not a second move.
+        const quint64 afterExtend = guard->epoch();
+        QVERIFY(guard->observe(kNow + 31000, kNow + 90000, 7, kSessionId, &why));
+        QCOMPARE(guard->epoch(), afterExtend);
+        QCOMPARE(guard->snapshot(kNow + 31000).deadlineMs, kNow + 90000);
+
+        // And the strict extend() primitive still refuses the repeat.
+        QVERIFY(!guard->extend(kNow + 31000, kNow + 90000, 7, kSessionId, &why));
+        QCOMPARE(int(why.reason), int(Kanade::NativeReason::LeaseNotExtended));
+    }
+
+    void leaseObserveStillFailsClosed()
+    {
+        Kanade::NativeResult why;
+
+        // A LOWER confirmed deadline is never a successful observation: it must
+        // not shorten the live lease (the review's explicit requirement).
+        auto guard = Kanade::LiveLeaseGuard::create(kSessionId, 7, kNow + 60000, kNow, 90000, &why);
+        QVERIFY(guard != nullptr);
+        const quint64 epochBefore = guard->epoch();
+        why = Kanade::NativeResult{};
+        QVERIFY(!guard->observe(kNow, kNow + 30000, 7, kSessionId, &why));
+        QCOMPARE(int(why.reason), int(Kanade::NativeReason::LeaseNotExtended));
+        QCOMPARE(guard->epoch(), epochBefore);
+        QCOMPARE(guard->snapshot(kNow).deadlineMs, kNow + 60000);
+        QVERIFY(guard->isLive(kNow));
+
+        // Wrong run generation / session is refused even when the deadline is
+        // unchanged, so a stale lane can never be told "all good".
+        why = Kanade::NativeResult{};
+        QVERIFY(!guard->observe(kNow, kNow + 60000, 8, kSessionId, &why));
+        QCOMPARE(int(why.reason), int(Kanade::NativeReason::LeaseGenerationMismatch));
+        why = Kanade::NativeResult{};
+        QVERIFY(!guard->observe(kNow, kNow + 60000, 7, kHostId, &why));
+        QCOMPARE(int(why.reason), int(Kanade::NativeReason::LeaseSessionMismatch));
+
+        // A strictly later confirmation beyond the locally honoured span is a
+        // protocol error, not an extension.
+        why = Kanade::NativeResult{};
+        QVERIFY(!guard->observe(kNow, kNow + 60000 + 90001, 7, kSessionId, &why));
+        QCOMPARE(int(why.reason), int(Kanade::NativeReason::LeaseDeadlineInvalid));
+        QCOMPARE(guard->epoch(), epochBefore);
+        QVERIFY(guard->isLive(kNow));
+
+        // Elapsed locally: latched, and no later confirmation can revive it.
+        auto elapsed = Kanade::LiveLeaseGuard::create(kSessionId, 7, kNow + 5000, kNow, 90000, &why);
+        QVERIFY(elapsed != nullptr);
+        why = Kanade::NativeResult{};
+        QVERIFY(!elapsed->observe(kNow + 5000, kNow + 80000, 7, kSessionId, &why));
+        QCOMPARE(int(why.reason), int(Kanade::NativeReason::LeaseExpired));
+        QCOMPARE(int(elapsed->deadReason()), int(Kanade::NativeReason::LeaseExpired));
+        QVERIFY(!elapsed->observe(kNow, kNow + 90000, 7, kSessionId, &why));
+        QVERIFY(!elapsed->isLive(kNow));
+
+        // Revoked by the owner: a later confirmation can never reopen it.
+        auto revoked = Kanade::LiveLeaseGuard::create(kSessionId, 7, kNow + 60000, kNow, 90000, &why);
+        QVERIFY(revoked != nullptr);
+        revoked->revoke(Kanade::NativeReason::LeaseRevoked);
+        why = Kanade::NativeResult{};
+        QVERIFY(!revoked->observe(kNow, kNow + 90000, 7, kSessionId, &why));
+        QCOMPARE(int(why.reason), int(Kanade::NativeReason::LeaseRevoked));
+        QVERIFY(!revoked->isLive(kNow));
+    }
+
+    void controllerTickLeaseKeepsRepeatedDeadlineAlive()
+    {
+        // The production entry point onLeaseTick() calls, on the production
+        // clock, with the gate armed.  A repeated confirmed deadline must leave
+        // the run Bound and live; the old renewLease() call revoked it here.
+        const qint64 start = Kanade::managedMonotonicNowMs();
+        ManagedEndpointSpec spec = validSpec();
+        spec.confirmedDeadlineMs = start + 60000;
+        ValidationResult contextReason;
+        const auto context = makeContext(spec, contextReason, start);
+        QVERIFY2(context.has_value(), qPrintable(contextReason.detail));
+
+        Kanade::ManagedNativeController controller;
+        QVERIFY(controller.begin(*context));
+        const auto guard = controller.leaseGuard();
+        QVERIFY(guard != nullptr);
+
+        Kanade::RuntimeBinding binding;
+        binding.sessionId = kSessionId;
+        binding.runGeneration = 7;
+        binding.transportId = QStringLiteral("tick-transport");
+        binding.ipcSequence = 1;
+        binding.ipcVerified = true;
+        QVERIFY2(controller.runtimeBound(binding), qPrintable(controller.failureReason()));
+        QCOMPARE(int(controller.state()), int(Kanade::ManagedNativeController::State::Bound));
+
+        const qint64 heldDeadline = guard->snapshot(Kanade::managedMonotonicNowMs()).deadlineMs;
+        QCOMPARE(heldDeadline, context->confirmedDeadlineMs());
+        const quint64 epochBefore = guard->epoch();
+
+        QString reason = QStringLiteral("sentinel");
+        for (int i = 0; i < 30; ++i) {
+            QVERIFY2(controller.tickLease(heldDeadline, &reason), qPrintable(reason));
+            QVERIFY(reason.isEmpty());
+            QCOMPARE(int(guard->deadReason()), int(Kanade::NativeReason::Ok));
+            QCOMPARE(int(controller.state()), int(Kanade::ManagedNativeController::State::Bound));
+        }
+        QCOMPARE(guard->epoch(), epochBefore);
+        QCOMPARE(guard->snapshot(Kanade::managedMonotonicNowMs()).deadlineMs, heldDeadline);
+
+        // One real server confirmation: exactly one move, run still Bound.
+        const qint64 extendedDeadline = heldDeadline + 20000;
+        QVERIFY2(controller.tickLease(extendedDeadline, &reason), qPrintable(reason));
+        QVERIFY(guard->epoch() > epochBefore);
+        QCOMPARE(guard->snapshot(Kanade::managedMonotonicNowMs()).deadlineMs, extendedDeadline);
+        QCOMPARE(int(controller.state()), int(Kanade::ManagedNativeController::State::Bound));
+        const quint64 afterExtend = guard->epoch();
+        QVERIFY(controller.tickLease(extendedDeadline, &reason));
+        QCOMPARE(guard->epoch(), afterExtend);
+
+        // An over-cap confirmation fails the run closed instead of being used.
+        QString overCapReason;
+        QVERIFY(!controller.tickLease(extendedDeadline
+                                          + 2 * ManagedEndpointContext::kLeaseTtlCapMs,
+                                      &overCapReason));
+        QVERIFY(!overCapReason.isEmpty());
+        QCOMPARE(int(controller.state()), int(Kanade::ManagedNativeController::State::Failed));
+        QVERIFY(!guard->isLive(Kanade::managedMonotonicNowMs()));
+
+        // A tick after the terminal state can never revive run or lease.
+        QVERIFY(!controller.tickLease(heldDeadline, &overCapReason));
+        QCOMPARE(int(controller.state()), int(Kanade::ManagedNativeController::State::Failed));
+        QVERIFY(!guard->isLive(Kanade::managedMonotonicNowMs()));
+    }
+
+    void controllerTickBeforeArmKeepsContextInStep()
+    {
+        // A server confirmation lands between begin() and runtimeBound().  The
+        // gate refuses a lease ahead of the context it arms with, so arming must
+        // first bring the context forward to the lease's confirmed deadline.
+        // Otherwise a perfectly healthy run would fail to arm.
+        const qint64 start = Kanade::managedMonotonicNowMs();
+        ManagedEndpointSpec spec = validSpec();
+        spec.confirmedDeadlineMs = start + 60000;
+        ValidationResult contextReason;
+        const auto context = makeContext(spec, contextReason, start);
+        QVERIFY2(context.has_value(), qPrintable(contextReason.detail));
+
+        Kanade::ManagedNativeController controller;
+        QVERIFY(controller.begin(*context));
+        const auto guard = controller.leaseGuard();
+        QVERIFY(guard != nullptr);
+
+        // One real confirmation, as the 1 s tick would apply it.
+        QString reason;
+        const qint64 renewed = start + 85000;
+        QVERIFY2(controller.tickLease(renewed, &reason), qPrintable(reason));
+        QCOMPARE(guard->snapshot(Kanade::managedMonotonicNowMs()).deadlineMs, renewed);
+
+        Kanade::RuntimeBinding binding;
+        binding.sessionId = kSessionId;
+        binding.runGeneration = 7;
+        binding.transportId = QStringLiteral("prearm-transport");
+        binding.ipcSequence = 1;
+        binding.leaseDeadlineMs = renewed;
+        binding.ipcVerified = true;
+        QVERIFY2(controller.runtimeBound(binding), qPrintable(controller.failureReason()));
+        QCOMPARE(int(controller.state()), int(Kanade::ManagedNativeController::State::Bound));
+    }
+
+    void controllerArmRefusesExpiredLease()
+    {
+        // Same window, but the lease elapsed locally before the binding arrived:
+        // arming must fail closed rather than arm a dead run.
+        const qint64 start = Kanade::managedMonotonicNowMs();
+        ManagedEndpointSpec spec = validSpec();
+        spec.confirmedDeadlineMs = start + 60000;
+        ValidationResult contextReason;
+        const auto context = makeContext(spec, contextReason, start);
+        QVERIFY(context.has_value());
+
+        Kanade::ManagedNativeController controller;
+        QVERIFY(controller.begin(*context));
+        const auto guard = controller.leaseGuard();
+        QVERIFY(guard != nullptr);
+
+        guard->revoke(Kanade::NativeReason::LeaseRevoked);
+
+        Kanade::RuntimeBinding binding;
+        binding.sessionId = kSessionId;
+        binding.runGeneration = 7;
+        binding.ipcSequence = 1;
+        binding.ipcVerified = true;
+        QVERIFY(!controller.runtimeBound(binding));
+        QCOMPARE(int(controller.state()), int(Kanade::ManagedNativeController::State::Failed));
+        QVERIFY(!guard->isLive(Kanade::managedMonotonicNowMs()));
     }
 
     void portPolicyValidatorFailsClosed()

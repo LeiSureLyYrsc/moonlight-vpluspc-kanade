@@ -1703,30 +1703,42 @@ void KanadeController::bindNativeReady()
         const QString sessionId = m_onlineSession->sessionId();
         const quint64 generation = m_onlineRunGeneration;
         QMutexLocker locker(&m_nativeMutex);
-        // The transport id is this run's immutable id (a UUID, never a secret):
-        // both the binding and the proof name the SAME transport.
-        Kanade::RuntimeBinding binding;
-        binding.sessionId = sessionId;
-        binding.runGeneration = generation;
-        binding.transportId = m_onlineRunId;
-        binding.ipcSequence = readySeq - 1;
-        binding.leaseDeadlineMs = proofDeadline;
-        binding.ipcVerified = true;
-
-        QString why;
-        if (!native->runtimeBound(binding, &why)) {
-            failure = why.isEmpty() ? QStringLiteral("sidecar_unverified") : why;
+        // Fold in the owner's own CURRENT confirmed lease before arming.  The
+        // 1 s tick is the only other thing that advances the shared guard, so a
+        // confirmation landing between the last tick and this frame would
+        // otherwise leave the guard behind the owner's session.  observe() is
+        // the same strict path the tick uses (equal deadline = no-op; lower /
+        // foreign / elapsed / over-cap = fail closed), so this can only follow a
+        // deadline Kanade itself confirmed.
+        QString leaseWhy;
+        if (!native->tickLease(proofDeadline, &leaseWhy)) {
+            failure = leaseWhy.isEmpty() ? QStringLiteral("lease_expired") : leaseWhy;
         } else {
-            Kanade::ReadyProof proof;
-            proof.sessionId = sessionId;
-            proof.runGeneration = generation;
-            proof.transportId = m_onlineRunId;
-            proof.ipcSequence = readySeq;
-            // Identical deadline: the proof may only tighten, never extend.
-            proof.leaseDeadlineMs = proofDeadline;
-            proof.ipcVerified = true;
-            if (!native->runtimeReady(proof, &why)) {
-                failure = why.isEmpty() ? QStringLiteral("runtime_unconfigured") : why;
+            // The transport id is this run's immutable id (a UUID, never a
+            // secret): both the binding and the proof name the SAME transport.
+            Kanade::RuntimeBinding binding;
+            binding.sessionId = sessionId;
+            binding.runGeneration = generation;
+            binding.transportId = m_onlineRunId;
+            binding.ipcSequence = readySeq - 1;
+            binding.leaseDeadlineMs = proofDeadline;
+            binding.ipcVerified = true;
+
+            QString why;
+            if (!native->runtimeBound(binding, &why)) {
+                failure = why.isEmpty() ? QStringLiteral("sidecar_unverified") : why;
+            } else {
+                Kanade::ReadyProof proof;
+                proof.sessionId = sessionId;
+                proof.runGeneration = generation;
+                proof.transportId = m_onlineRunId;
+                proof.ipcSequence = readySeq;
+                // Identical deadline: the proof may only tighten, never extend.
+                proof.leaseDeadlineMs = proofDeadline;
+                proof.ipcVerified = true;
+                if (!native->runtimeReady(proof, &why)) {
+                    failure = why.isEmpty() ? QStringLiteral("runtime_unconfigured") : why;
+                }
             }
         }
     }
@@ -2161,26 +2173,41 @@ void KanadeController::onLeaseTick()
         Q_EMIT onlineLeaseChanged();
         return;
     }
+#ifndef KANADE_CONTROL_PLANE_TEST_ONLY
+    if (m_native != nullptr) {
+        // The 1 s watchdog OBSERVES the confirmed deadline; it does not demand
+        // a strictly later one.  The server confirms a later lease roughly every
+        // 30 s, so most of these ticks repeat the current deadline - that is
+        // "no news", and tickLease() therefore succeeds without moving
+        // anything.  It still fails closed (and returns false) on an expired or
+        // revoked lease, a foreign run, a lower deadline or an over-cap
+        // confirmation.  The object is not thread-safe; take a copy of the
+        // pointer and tryLock (never block the tick behind a worker).
+        const std::shared_ptr<Kanade::ManagedNativeController> native = m_native;
+        if (m_nativeMutex.tryLock()) {
+            const bool observed = native->tickLease(deadline);
+            m_nativeMutex.unlock();
+            if (!observed) {
+                // Terminal (expired/revoked/refused confirmation).  The lock is
+                // already released, so use the ONE existing cancellation path:
+                // it clears the readiness facts, revokes the native gate/lease,
+                // stops the sidecar and closes the session.  Nothing is renewed
+                // and no partial teardown is duplicated here.
+                cancelOnlineSession();
+                return;
+            }
+        }
+        // If the mutex is busy the guard still expires on its own clock, which
+        // is the conservative direction: no extension is ever granted here.
+    }
+#endif
     // Only a sidecar that already received its single `authorize` may be
     // renewed, and only with a STRICTLY greater absolute deadline (its gate
-    // rejects repeats and never extends from the peer's view).
+    // rejects repeats and never extends from the peer's view).  This runs only
+    // after the native observation above accepted the deadline.
     if (m_sidecar != nullptr && m_sidecarAuthorized) {
         m_sidecar->renewLease(deadline);
     }
-#ifndef KANADE_CONTROL_PLANE_TEST_ONLY
-    if (m_native != nullptr) {
-        // Forward-only: the guard refuses an equal/lower deadline.  Renewal needs
-        // the object, which is not thread-safe; take a copy of the pointer and
-        // tryLock (never block the tick behind a worker).
-        const std::shared_ptr<Kanade::ManagedNativeController> native = m_native;
-        if (m_nativeMutex.tryLock()) {
-            native->renewLease(deadline);
-            m_nativeMutex.unlock();
-        }
-        // If the mutex is busy the guard still expires on its own clock, which is
-        // the conservative direction: no extension is ever granted here.
-    }
-#endif
     Q_EMIT onlineLeaseChanged();
 }
 
