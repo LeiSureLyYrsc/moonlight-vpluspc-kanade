@@ -129,6 +129,16 @@ jobs:
           if errorlevel 1 exit /b %ERRORLEVEL%
           call scripts\run-test.bat reconnect_video_callbacks reconnect_video_callbacks
           if errorlevel 1 exit /b %ERRORLEVEL%
+      - name: Generate and verify the Chinese catalog embedded in the portable
+        shell: cmd
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_FORCE_STDERR_LOGGING: '1'
+        run: |
+          lrelease app\languages\qml_zh_CN.ts -qm app\languages\qml_zh_CN.qm
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          qmltestrunner -input tests\settings_localization -translation app\languages\qml_zh_CN.qm SettingsLocalization::test_compiledChinese
+          if errorlevel 1 exit /b %ERRORLEVEL%
       - name: Build unsigned Moonlight V+ x64 portable on the runner
         shell: cmd
         env:

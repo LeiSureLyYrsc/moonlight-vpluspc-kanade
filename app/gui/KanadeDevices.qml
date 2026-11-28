@@ -903,6 +903,7 @@ FocusScope {
                 title: qsTr("Kanade online mode")
                 subtitle: page.supported
                           ? qsTr("Select Connect to request an online session. When the data path is ready, pair with Sunshine or select an app. Online mode never falls back to a local network address.")
+                            + " " + qsTr("Online sessions do not send microphone audio. Your LAN microphone setting stays unchanged.")
                           : ""
 
                 Text {

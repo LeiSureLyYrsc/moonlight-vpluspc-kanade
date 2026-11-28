@@ -4,6 +4,10 @@
 
 ## 工作流概述
 
+### Kanade Windows x64 实验验证 (`kanade-validation.yml`)
+
+推送到 `rem-2-validation` 会触发验证。该工作流按锁定的 common-c 版本校验并应用端口策略补丁，运行夹具和原生回归检查，再构建未签名便携包。制品附 `kanade-validation.json`，用于核对源码、补丁和可执行文件的哈希。普通发布包不能代替这个实验包；工作流通过也不等于已经串流。双机操作见[托管客户端验收补充](../../docs/kanade-windows-validation.md)。
+
 ### 主构建工作流 (`build.yml`)
 
 **触发条件：**

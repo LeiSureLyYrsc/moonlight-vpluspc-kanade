@@ -4133,6 +4133,10 @@
 <context>
     <name>KanadeDevices</name>
     <message>
+        <source>Online sessions do not send microphone audio. Your LAN microphone setting stays unchanged.</source>
+        <translation>在线会话不传输麦克风声音，不影响局域网的麦克风设置。</translation>
+    </message>
+    <message>
         <source>Online devices</source>
         <translation>在线设备</translation>
     </message>

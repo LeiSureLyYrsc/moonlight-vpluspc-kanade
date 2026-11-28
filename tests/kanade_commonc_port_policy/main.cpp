@@ -6,6 +6,7 @@
 
 #include "Limelight.h"
 #include "Rtsp.h"
+#include "streaming/streamconfigpolicy.h"
 
 static QUdpSocket* socketOut;
 static quint16 sinkPort;
@@ -127,5 +128,13 @@ int main(int argc, char** argv) {
         writes != audioStartWrites + 1 || !(sink.hasPendingDatagrams() || sink.waitForReadyRead(1000)))
         return 14;
     std::puts("SETUP managed reject: sends=0; SETUP accepted sink control: sends=1; audio guard rejects: sends=0; audio accepted sink control: sends=1");
+
+    // The shared production predicate. Managed never requests the microphone;
+    // the LAN preference still does. The managed gate's own mic rejection is
+    // covered above, and its accepted value is exactly the withheld one.
+    static_assert(StreamConfigPolicy::requestHostMicrophone(true, false), "LAN+on");
+    static_assert(!StreamConfigPolicy::requestHostMicrophone(true, true), "managed+on");
+    static_assert(!StreamConfigPolicy::requestHostMicrophone(false, false), "LAN+off");
+    static_assert(!StreamConfigPolicy::requestHostMicrophone(false, true), "managed+off");
     return 0;
 }

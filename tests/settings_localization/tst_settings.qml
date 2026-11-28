@@ -47,6 +47,9 @@ TestCase {
     }
 
     function test_compiledChinese() {
+        compare(qsTranslate("KanadeDevices", "Online devices"), "在线设备")
+        compare(qsTranslate("KanadeDevices", "Online sessions do not send microphone audio. Your LAN microphone setting stays unchanged."),
+                "在线会话不传输麦克风声音，不影响局域网的麦克风设置。")
         compare(qsTranslate("SettingsView", "Settings"), "设置")
         compare(qsTranslate("SettingsView", "Software Settings"), "软件设置")
         compare(qsTranslate("SettingsView", "Interface"), "界面")

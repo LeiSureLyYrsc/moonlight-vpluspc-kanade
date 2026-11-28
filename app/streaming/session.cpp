@@ -4,6 +4,7 @@
 #include "filemappingclient.h"
 #include "filemappingux.h"
 #include "settings/streamingpreferences.h"
+#include "streaming/streamconfigpolicy.h"
 #include "streaming/streamutils.h"
 #ifdef HAS_QT_SDL_WAYLAND_BRIDGE
 #include "streaming/waylandqtsdlbridge.h"
@@ -1968,7 +1969,11 @@ bool Session::initialize(QQuickWindow* qtWindow)
         break;
     }
 
-    m_StreamConfig.enableMic = m_Preferences->enableMicrophone;
+    // Managed sessions never request host microphone capture (common-c rejects
+    // enableMic); the LAN preference is only read, never rewritten.
+    m_StreamConfig.enableMic =
+        StreamConfigPolicy::requestHostMicrophone(m_Preferences->enableMicrophone,
+                                                  isManaged());
 
     LiInitializeAudioCallbacks(&m_AudioCallbacks);
     m_AudioCallbacks.init = arInit;
@@ -4743,6 +4748,13 @@ bool Session::startManagedConnectionAsync()
     // Foundation instance, not something the client may change.  The strict
     // rtspenc:// check below refuses a plaintext answer instead of proceeding.
     m_StreamConfig.encryptionFlags = ENCFLG_ALL;
+
+    // Managed pin has no microphone channel and common-c rejects enableMic;
+    // refuse instead of launching a stream it would fail.
+    if (m_StreamConfig.enableMic) {
+        emit displayLaunchError(tr("The managed session configuration is invalid."));
+        return false;
+    }
 
     Kanade::NativeEndpoint endpoint = stream.endpoint;
     QSslCertificate cert = stream.serverCert;
